@@ -141,7 +141,8 @@ def check_balance(base_url: str, api_key: str, api_secret: str) -> float | None:
     for account in coins:
         for coin in account.get("coin", []):
             if coin.get("coin") == "USDT":
-                return float(coin.get("availableToWithdraw", 0))
+                val = coin.get("availableToWithdraw", "0")
+                return float(val) if val else 0.0
     return 0.0
 
 
