@@ -671,8 +671,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Backtest the momentum scanner + position manager on historical data"
     )
-    parser.add_argument("--symbols", nargs="+", default=["RAVEUSDT", "POWERUSDT", "ARIAUSDT"],
-                        help="Symbols to backtest (default: RAVEUSDT POWERUSDT ARIAUSDT)")
+    parser.add_argument("--symbols", nargs="+", default=None,
+                        help="Symbols to backtest (e.g. --symbols BTCUSDT ETHUSDT)")
     parser.add_argument("--days", type=int, default=10,
                         help="Days of history to analyze (default: 10)")
     parser.add_argument("--min-score", type=float, default=60,
@@ -692,49 +692,103 @@ def main():
     base_url = TESTNET_URL if args.testnet else MAINNET_URL
     env_label = "TESTNET" if args.testnet else "MAINNET"
 
-    print(f"\n{'='*80}")
-    print(f"  MOMENTUM SCANNER BACKTEST [{env_label}]")
-    print(f"{'='*80}")
-    print(f"  Symbols:        {', '.join(args.symbols)}")
-    print(f"  Period:         last {args.days} days")
-    print(f"  Trigger:        score {args.min_score}+")
-    print(f"  Position:       ${args.amount} @ {args.leverage}x leverage")
-    print(f"  Initial SL:     {args.initial_sl}%")
-    print(f"  Trailing tiers: 10%→5% trail, 30%→3%, 100%→2%, 300%→1.5%")
-    print(f"  Scan interval:  every {args.scan_interval}h")
-
     all_results = []
     grand_total_pnl = 0
+    symbols_tested = 0
 
-    for symbol in args.symbols:
-        result = run_backtest(
-            base_url, symbol, args.days, args.scan_interval,
-            args.min_score, args.amount, args.leverage, args.initial_sl,
-        )
-        if result:
-            all_results.append(result)
-            pnl = display_backtest(result, args.amount, args.leverage, args.min_score)
-            if pnl:
-                grand_total_pnl += pnl
+    def print_settings():
+        print(f"\n{'='*80}")
+        print(f"  MOMENTUM SCANNER BACKTEST [{env_label}]")
+        print(f"{'='*80}")
+        print(f"  Period:         last {args.days} days")
+        print(f"  Trigger:        score {args.min_score}+")
+        print(f"  Position:       ${args.amount} @ {args.leverage}x leverage")
+        print(f"  Initial SL:     {args.initial_sl}%")
+        print(f"  Trailing tiers: 10%→5% trail, 30%→3%, 100%→2%, 300%→1.5%")
+        print(f"  Scan interval:  every {args.scan_interval}h")
 
-    # Grand summary
-    print(f"\n{'='*80}")
-    print(f"  GRAND TOTAL ACROSS ALL SYMBOLS")
-    print(f"{'='*80}")
+    def run_for_symbols(symbols):
+        nonlocal grand_total_pnl, symbols_tested
+        for symbol in symbols:
+            result = run_backtest(
+                base_url, symbol, args.days, args.scan_interval,
+                args.min_score, args.amount, args.leverage, args.initial_sl,
+            )
+            if result:
+                all_results.append(result)
+                pnl = display_backtest(result, args.amount, args.leverage, args.min_score)
+                if pnl:
+                    grand_total_pnl += pnl
+                symbols_tested += 1
 
-    total_trades = sum(len(r["trades"]) for r in all_results)
-    total_wins = sum(1 for r in all_results for t in r["trades"] if t["pnl_usd"] > 0)
+    def print_grand_summary():
+        if not all_results:
+            return
+        print(f"\n{'='*80}")
+        print(f"  GRAND TOTAL ACROSS ALL SYMBOLS")
+        print(f"{'='*80}")
+        total_trades = sum(len(r["trades"]) for r in all_results)
+        total_wins = sum(1 for r in all_results for t in r["trades"] if t["pnl_usd"] > 0)
+        print(f"  Symbols tested: {symbols_tested}")
+        print(f"  Total trades:   {total_trades}")
+        if total_trades > 0:
+            print(f"  Win rate:       {total_wins}/{total_trades} ({total_wins/total_trades*100:.0f}%)")
+        print(f"  Combined P&L:   ${grand_total_pnl:+,.2f}")
+        if symbols_tested > 0:
+            print(f"  Combined ROI:   {grand_total_pnl / (args.amount * symbols_tested) * 100:+.1f}% "
+                  f"on ${args.amount * symbols_tested:,.0f} total capital")
+        print()
 
-    print(f"  Symbols tested: {len(all_results)}")
-    print(f"  Total trades:   {total_trades}")
-    if total_trades > 0:
-        print(f"  Win rate:       {total_wins}/{total_trades} ({total_wins/total_trades*100:.0f}%)")
-    print(f"  Combined P&L:   ${grand_total_pnl:+,.2f}")
-    print(f"  Combined ROI:   {grand_total_pnl / (args.amount * len(args.symbols)) * 100:+.1f}% "
-          f"on ${args.amount * len(args.symbols):,.0f} total capital")
-    print()
+    # If symbols passed via CLI, run them and done
+    if args.symbols:
+        print_settings()
+        print(f"  Symbols:        {', '.join(args.symbols)}")
+        run_for_symbols(args.symbols)
+        print_grand_summary()
+        if args.save:
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            filename = f"backtest_{ts}.json"
+            with open(filename, "w") as f:
+                json.dump(all_results, f, indent=2, default=str)
+            print(f"  Full results saved to {filename}")
+        return
 
-    if args.save:
+    # Interactive mode — ask the user which coins to backtest
+    print_settings()
+    print(f"\n  Enter coin names to backtest (e.g. RAVE, BTC, ETHUSDT)")
+    print(f"  You can enter multiple separated by spaces/commas")
+    print(f"  Type 'done' or 'q' to finish and see the grand summary\n")
+
+    while True:
+        try:
+            user_input = input("  Coin(s) to backtest: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not user_input or user_input.lower() in ("done", "q", "quit", "exit"):
+            break
+
+        # Parse input: split by spaces, commas, or both
+        raw = user_input.replace(",", " ").split()
+        symbols = []
+        for s in raw:
+            s = s.strip().upper()
+            if not s:
+                continue
+            # Auto-append USDT if not already there
+            if not s.endswith("USDT") and not s.endswith("USD"):
+                s = s + "USDT"
+            symbols.append(s)
+
+        if symbols:
+            run_for_symbols(symbols)
+            print_grand_summary()
+            print(f"  Enter more coins or type 'done' to finish\n")
+
+    print_grand_summary()
+
+    if args.save and all_results:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         filename = f"backtest_{ts}.json"
         with open(filename, "w") as f:
