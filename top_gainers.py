@@ -9,6 +9,8 @@ Usage:
     python3 top_gainers.py --top 10      # show top N (default 20)
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import time

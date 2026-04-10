@@ -22,6 +22,8 @@ Usage:
 No API key required — all endpoints are public.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import math
