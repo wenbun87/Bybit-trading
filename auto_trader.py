@@ -51,8 +51,8 @@ RECV_WINDOW = "5000"
 
 # Safety defaults
 DEFAULT_AMOUNT_USDT = 500       # $ per trade
-DEFAULT_MIN_SCORE = 80          # EXTREME threshold
-DEFAULT_INTERVAL_MIN = 60       # scan every 60 minutes
+DEFAULT_MIN_SCORE = 60          # HIGH threshold (catch momentum early)
+DEFAULT_INTERVAL_MIN = 15       # scan every 15 minutes
 MAX_TRADES_PER_CYCLE = 2        # max trades per scan cycle
 MAX_TRADES_PER_DAY = 6          # max trades in 24 hours
 MAX_TOTAL_EXPOSURE_USDT = 3000  # stop opening if total exceeds this
