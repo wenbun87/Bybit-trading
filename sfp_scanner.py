@@ -971,9 +971,21 @@ def main():
         if args.watch <= 0:
             break
 
-        print(f"\n  Next scan in {args.watch} minutes... (Ctrl+C to stop)\n")
+        if trading_mode:
+            print(f"\n  Next scan in {args.watch} min (positions checked every 2 min)... (Ctrl+C to stop)\n")
+        else:
+            print(f"\n  Next scan in {args.watch} minutes... (Ctrl+C to stop)\n")
         try:
-            time.sleep(args.watch * 60)
+            remaining = args.watch * 60
+            while remaining > 0:
+                wait = min(120, remaining) if trading_mode else remaining
+                time.sleep(wait)
+                remaining -= wait
+                if remaining > 0 and trading_mode:
+                    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+                    print(f"  [position check | {now} | next scan in {remaining//60}m{remaining%60:02d}s]")
+                    pos_state = manage_sfp_positions(
+                        base_url, api_key, api_secret, args.initial_sl, is_live, pos_state)
         except KeyboardInterrupt:
             print("\n  Scanner stopped.")
             break

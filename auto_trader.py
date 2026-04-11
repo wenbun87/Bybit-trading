@@ -656,10 +656,19 @@ def run_auto_trader(args):
               f"{len(session.traded_symbols)} unique coins | "
               f"${session.total_exposure:,.0f} exposure")
 
-        # Wait for next cycle
-        print(f"\n  Next scan in {args.interval} minutes... (Ctrl+C to stop)")
+        # Wait for next scan, but check positions every 2 min in between
+        print(f"\n  Next scan in {args.interval} min (positions checked every 2 min)... (Ctrl+C to stop)")
         try:
-            time.sleep(args.interval * 60)
+            remaining = args.interval * 60
+            while remaining > 0:
+                wait = min(120, remaining)  # 2 minutes or whatever is left
+                time.sleep(wait)
+                remaining -= wait
+                if remaining > 0:
+                    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+                    print(f"\n  [position check | {now} | next scan in {remaining//60}m{remaining%60:02d}s]")
+                    pos_state = manage_positions(base_url, api_key, api_secret,
+                                                 args.initial_sl, args.live, pos_state)
         except KeyboardInterrupt:
             print(f"\n\n{'='*70}")
             print(f"  AUTO-TRADER STOPPED")
