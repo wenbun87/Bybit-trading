@@ -1,27 +1,31 @@
 #!/usr/bin/env python3
 """
-Bybit Momentum Auto-Trader
+Bybit Momentum Auto-Trader + Position Manager (all-in-one)
 
-Runs the momentum scanner on a schedule and automatically opens $500
-perpetual positions on coins that hit EXTREME momentum (score 80+).
+Runs the momentum scanner on a schedule, opens positions on high-scoring
+coins, AND manages exits with adaptive trailing stops — all in one script.
+
+  Entry:  Momentum score 60+ → market buy $500 perp
+  Exit:   -5% initial SL → trailing stops tighten as profit grows
+          10%+ → 5% trail | 30%+ → 3% | 100%+ → 2% | 300%+ → 1.5%
 
 SAFETY FEATURES:
   - Starts in DRY-RUN mode by default (no real trades until you pass --live)
   - Max trades per cycle and per day
   - Won't re-enter a coin already traded in this session
   - Max total exposure cap
-  - All trades logged to CSV
+  - All trades + exit events logged to CSV
 
 REQUIRES:
   export BYBIT_API_KEY="your_key"
   export BYBIT_API_SECRET="your_secret"
 
 Usage:
-    python3 auto_trader.py                        # dry-run, scan every 60 min
-    python3 auto_trader.py --interval 30          # scan every 30 min
+    python3 auto_trader.py                        # dry-run, scan every 15 min
     python3 auto_trader.py --live                 # REAL TRADES on mainnet
     python3 auto_trader.py --live --amount 250    # $250 per trade instead of $500
-    python3 auto_trader.py --min-score 70         # trigger on score 70+ instead of 80
+    python3 auto_trader.py --min-score 70         # trigger on score 70+
+    python3 auto_trader.py --live --initial-sl 8  # 8% initial stop loss
 """
 
 from __future__ import annotations
@@ -59,6 +63,19 @@ MAX_TOTAL_EXPOSURE_USDT = 3000  # stop opening if total exceeds this
 DEFAULT_LEVERAGE = 10           # 10x leverage
 
 TRADE_LOG_FILE = "trade_log.csv"
+EXIT_LOG_FILE = "exit_log.csv"
+STATE_FILE = "position_state.json"
+
+# Trailing stop tiers: (min_profit_pct, trailing_stop_pct)
+TRAILING_TIERS = [
+    (0,    0),     # below 10%: no trailing stop, just initial SL
+    (10,   5.0),   # 10%+ profit: trail at 5% distance
+    (30,   3.0),   # 30%+ profit: tighten to 3%
+    (100,  2.0),   # 100%+ profit: tighten to 2%
+    (300,  1.5),   # 300%+ profit: very tight 1.5%
+]
+
+DEFAULT_INITIAL_SL_PCT = 5.0
 
 # ──────────────────────────────────────────────
 # Authenticated API client
@@ -260,6 +277,175 @@ def log_trade(symbol: str, side: str, qty: str, price: float,
 
 
 # ──────────────────────────────────────────────
+# Position management (trailing stops)
+# ──────────────────────────────────────────────
+
+def set_trading_stop(base_url, api_key, api_secret, symbol, position_idx,
+                     stop_loss=None, trailing_stop=None):
+    params = {
+        "category": "linear",
+        "symbol": symbol,
+        "positionIdx": position_idx,
+    }
+    if stop_loss is not None:
+        params["stopLoss"] = str(stop_loss)
+    if trailing_stop is not None:
+        params["trailingStop"] = str(trailing_stop)
+    return api_request(base_url, "POST", "/v5/position/trading-stop",
+                       api_key, api_secret, params)
+
+
+def get_current_tier(profit_pct):
+    active = TRAILING_TIERS[0]
+    for min_profit, trail_pct in TRAILING_TIERS:
+        if profit_pct >= min_profit:
+            active = (min_profit, trail_pct)
+    return active
+
+
+def init_exit_log():
+    if not Path(EXIT_LOG_FILE).exists():
+        with open(EXIT_LOG_FILE, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "timestamp", "symbol", "side", "entry_price", "exit_trigger",
+                "profit_pct", "trailing_tier", "action",
+            ])
+
+
+def log_exit_event(symbol, side, entry_price, trigger, profit_pct, tier, action):
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with open(EXIT_LOG_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([now, symbol, side, entry_price, trigger, profit_pct, tier, action])
+
+
+def load_position_state():
+    if Path(STATE_FILE).exists():
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+def save_position_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def manage_positions(base_url, api_key, api_secret, initial_sl_pct, is_live, pos_state):
+    """Check all open positions and manage trailing stops. Returns updated state."""
+    positions = get_open_positions(base_url, api_key, api_secret)
+
+    if not positions:
+        if pos_state:
+            pos_state = {}
+            save_position_state(pos_state)
+        return pos_state
+
+    print(f"\n  --- Position Manager: {len(positions)} open position(s) ---\n")
+    active_symbols = set()
+
+    for pos in positions:
+        symbol = pos.get("symbol", "")
+        side = pos.get("side", "")
+        size = float(pos.get("size", "0") or "0")
+        entry_price = float(pos.get("avgPrice", "0") or "0")
+        mark_price = float(pos.get("markPrice", "0") or "0")
+        position_idx = int(pos.get("positionIdx", "0") or "0")
+        current_sl = float(pos.get("stopLoss", "0") or "0")
+        current_trail = float(pos.get("trailingStop", "0") or "0")
+        leverage = pos.get("leverage", "?")
+
+        if entry_price <= 0 or mark_price <= 0:
+            continue
+
+        active_symbols.add(symbol)
+
+        if side == "Buy":
+            profit_pct = (mark_price - entry_price) / entry_price * 100
+        else:
+            profit_pct = (entry_price - mark_price) / entry_price * 100
+
+        lev = float(leverage) if leverage != "?" else 1
+        _, tier_trail_pct = get_current_tier(profit_pct)
+        state_key = f"{symbol}_{side}"
+
+        sl_str = f"${current_sl:,.6g}" if current_sl > 0 else "NONE"
+        trail_str = f"${current_trail:,.6g}" if current_trail > 0 else "OFF"
+        tier_str = f"{tier_trail_pct}%" if tier_trail_pct > 0 else "SL only"
+
+        print(f"  {symbol} {side} | ${entry_price:,.6g} → ${mark_price:,.6g} | "
+              f"PnL: {profit_pct:+.2f}% ({profit_pct*lev:+.1f}% lev) | "
+              f"SL: {sl_str} | Trail: {trail_str} | Tier: {tier_str}")
+
+        ps = pos_state.get(state_key, {
+            "initial_sl_set": False, "current_tier_pct": 0, "highest_profit": 0,
+        })
+        if profit_pct > ps.get("highest_profit", 0):
+            ps["highest_profit"] = profit_pct
+
+        action = None
+        new_sl = None
+        new_trail = None
+
+        # Set initial SL
+        if not ps["initial_sl_set"] and current_sl == 0:
+            if side == "Buy":
+                new_sl = round(entry_price * (1 - initial_sl_pct / 100), 6)
+            else:
+                new_sl = round(entry_price * (1 + initial_sl_pct / 100), 6)
+            action = f"SET initial SL at ${new_sl:,.6g} (-{initial_sl_pct}%)"
+            ps["initial_sl_set"] = True
+
+        # Upgrade trailing stop
+        elif tier_trail_pct > 0 and tier_trail_pct != ps.get("current_tier_pct", 0):
+            if tier_trail_pct < ps.get("current_tier_pct", 999) or ps.get("current_tier_pct", 0) == 0:
+                new_trail = round(mark_price * tier_trail_pct / 100, 6)
+                label = "ACTIVATE" if ps.get("current_tier_pct", 0) == 0 else "TIGHTEN"
+                action = f"{label} trail to {tier_trail_pct}% (${new_trail:,.6g} distance)"
+                ps["current_tier_pct"] = tier_trail_pct
+
+        if action:
+            print(f"    >> {action}")
+            if is_live:
+                result = set_trading_stop(base_url, api_key, api_secret, symbol,
+                                          position_idx, stop_loss=new_sl, trailing_stop=new_trail)
+                ret = result.get("retCode", -1)
+                if ret == 0:
+                    print(f"    >> APPLIED")
+                    log_exit_event(symbol, side, entry_price, "tier_update",
+                                   profit_pct, tier_trail_pct, action)
+                elif ret == 10001 and "position idx" in result.get("retMsg", "").lower():
+                    alt_idx = 1 if side == "Buy" else 2
+                    time.sleep(0.3)
+                    result2 = set_trading_stop(base_url, api_key, api_secret, symbol,
+                                               alt_idx, stop_loss=new_sl, trailing_stop=new_trail)
+                    if result2.get("retCode") == 0:
+                        print(f"    >> APPLIED (hedge mode)")
+                    else:
+                        print(f"    >> FAILED: {result2.get('retMsg')}")
+                else:
+                    print(f"    >> FAILED: {result.get('retMsg')}")
+            else:
+                print(f"    >> [DRY-RUN] Would apply")
+                log_exit_event(symbol, side, entry_price, "dry_run",
+                               profit_pct, tier_trail_pct, action)
+        else:
+            print(f"    >> OK")
+
+        pos_state[state_key] = ps
+
+    # Clean up closed positions
+    closed = [k for k in list(pos_state.keys()) if k.split("_")[0] not in active_symbols]
+    for k in closed:
+        print(f"  Position closed: {k}")
+        del pos_state[k]
+
+    save_position_state(pos_state)
+    return pos_state
+
+
+# ──────────────────────────────────────────────
 # Session state
 # ──────────────────────────────────────────────
 
@@ -315,10 +501,12 @@ def run_auto_trader(args):
     )
 
     init_trade_log()
+    init_exit_log()
+    pos_state = load_position_state()
 
     # Display config
     print(f"\n{'='*70}")
-    print(f"  MOMENTUM AUTO-TRADER [{env_label}] [{mode}]")
+    print(f"  MOMENTUM AUTO-TRADER + POSITION MANAGER [{env_label}] [{mode}]")
     print(f"{'='*70}")
     print(f"  Trade amount:    ${args.amount} USDT per trade")
     print(f"  Leverage:        {args.leverage}x")
@@ -327,7 +515,10 @@ def run_auto_trader(args):
     print(f"  Max per cycle:   {MAX_TRADES_PER_CYCLE} trades")
     print(f"  Max per day:     {MAX_TRADES_PER_DAY} trades")
     print(f"  Max exposure:    ${MAX_TOTAL_EXPOSURE_USDT:,}")
+    print(f"  Initial SL:      {args.initial_sl}%")
+    print(f"  Trailing tiers:  10%→5% | 30%→3% | 100%→2% | 300%→1.5%")
     print(f"  Trade log:       {TRADE_LOG_FILE}")
+    print(f"  Exit log:        {EXIT_LOG_FILE}")
 
     if not args.live:
         print(f"\n  >>> DRY-RUN MODE — no real orders will be placed <<<")
@@ -456,8 +647,12 @@ def run_auto_trader(args):
 
                 print()
 
+        # Manage existing positions (trailing stops)
+        pos_state = manage_positions(base_url, api_key, api_secret,
+                                     args.initial_sl, args.live, pos_state)
+
         # Session summary
-        print(f"  Session: {session.trades_today} trades today | "
+        print(f"\n  Session: {session.trades_today} trades today | "
               f"{len(session.traded_symbols)} unique coins | "
               f"${session.total_exposure:,.0f} exposure")
 
@@ -492,6 +687,8 @@ def main():
                         help=f"Minimum momentum score to trigger (default: {DEFAULT_MIN_SCORE})")
     parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL_MIN,
                         help=f"Scan interval in minutes (default: {DEFAULT_INTERVAL_MIN})")
+    parser.add_argument("--initial-sl", type=float, default=DEFAULT_INITIAL_SL_PCT,
+                        help=f"Initial stop loss %% (default: {DEFAULT_INITIAL_SL_PCT})")
     args = parser.parse_args()
 
     if args.live and not args.testnet:

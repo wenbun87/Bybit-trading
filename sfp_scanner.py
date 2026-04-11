@@ -1,38 +1,44 @@
 #!/usr/bin/env python3
 """
-Bybit Swing Failure Pattern (SFP) Scanner
+Bybit SFP Scanner + Auto-Trader + Position Manager (all-in-one)
 
-Scans high-volume Bybit perpetual contracts for Swing Failure Patterns:
+Scans high-volume Bybit perpetuals for Swing Failure Patterns and
+optionally auto-trades them with adaptive trailing stop exits.
 
-  Bearish SFP: Wick sweeps above a swing high, but candle closes below it.
-               → Liquidity was grabbed above the high, sellers stepped in.
+  Bearish SFP → Short entry (wick sweeps swing high, closes below)
+  Bullish SFP → Long entry  (wick sweeps swing low, closes above)
 
-  Bullish SFP: Wick sweeps below a swing low, but candle closes above it.
-               → Liquidity was grabbed below the low, buyers stepped in.
-
-Only scans coins with 24h turnover > $50M (configurable) to focus on
-liquid, structured markets where SFPs are most reliable.
+Exit management (same trailing stop tiers as the momentum auto-trader):
+  -5% initial SL → 10%+ → 5% trail | 30%+ → 3% | 100%+ → 2% | 300%+ → 1.5%
 
 Usage:
-    python3 sfp_scanner.py                     # one-shot scan (1h + 4h)
+    python3 sfp_scanner.py                     # scan only (no trades)
     python3 sfp_scanner.py --watch 30          # rescan every 30 min
+    python3 sfp_scanner.py --trade             # dry-run auto-trading
+    python3 sfp_scanner.py --trade --live      # REAL trades + position mgmt
+    python3 sfp_scanner.py --trade --live --amount 500 --leverage 5
     python3 sfp_scanner.py --timeframe 4h      # only scan 4h timeframe
-    python3 sfp_scanner.py --min-volume 100    # min $100M volume
-    python3 sfp_scanner.py --lookback 7        # 7-bar pivot lookback
-    python3 sfp_scanner.py --testnet           # use testnet
+    python3 sfp_scanner.py --min-grade B       # only trade B grade or better
 
-No API key required — all endpoints are public.
+REQUIRES (for --trade mode):
+  export BYBIT_API_KEY="your_key"
+  export BYBIT_API_SECRET="your_secret"
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
+import hmac
 import json
+import os
 import sys
 import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
+from pathlib import Path
 
 # ──────────────────────────────────────────────
 # Config
@@ -58,6 +64,27 @@ TIMEFRAMES = {
 }
 
 DEFAULT_TIMEFRAMES = ["1h", "4h"]
+
+# Trading config
+RECV_WINDOW = "5000"
+DEFAULT_AMOUNT_USDT = 500
+DEFAULT_LEVERAGE = 5
+MAX_TRADES_PER_CYCLE = 2
+MAX_TRADES_PER_DAY = 6
+DEFAULT_INITIAL_SL_PCT = 5.0
+DEFAULT_MIN_TRADE_GRADE = "B"  # only trade B or better
+
+TRAILING_TIERS = [
+    (0,    0),
+    (10,   5.0),
+    (30,   3.0),
+    (100,  2.0),
+    (300,  1.5),
+]
+
+SFP_TRADE_LOG = "sfp_trade_log.csv"
+SFP_EXIT_LOG = "sfp_exit_log.csv"
+SFP_STATE_FILE = "sfp_position_state.json"
 
 # ──────────────────────────────────────────────
 # Rate-limited API client
@@ -514,6 +541,335 @@ def save_results(results, filename="sfp_scan.json"):
     print(f"  Raw data saved to {filename}")
 
 
+# ──────────────────────────────────────────────
+# Trading + Position Management
+# ──────────────────────────────────────────────
+
+GRADE_ORDER = {"A+": 0, "A": 1, "B": 2, "C": 3, "D": 4}
+
+
+def get_credentials():
+    api_key = os.environ.get("BYBIT_API_KEY", "")
+    api_secret = os.environ.get("BYBIT_API_SECRET", "")
+    if not api_key or not api_secret:
+        print("\n  ERROR: BYBIT_API_KEY and BYBIT_API_SECRET must be set.")
+        sys.exit(1)
+    return api_key, api_secret
+
+
+def sign_request(api_key, api_secret, timestamp, params_str):
+    sign_str = f"{timestamp}{api_key}{RECV_WINDOW}{params_str}"
+    return hmac.new(api_secret.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
+
+
+def auth_request(base_url, method, path, api_key, api_secret, params=None):
+    timestamp = str(int(time.time() * 1000))
+    if method == "GET":
+        qs = "&".join(f"{k}={v}" for k, v in (params or {}).items())
+        sign = sign_request(api_key, api_secret, timestamp, qs)
+        url = f"{base_url}{path}" + (f"?{qs}" if qs else "")
+        req = urllib.request.Request(url, method="GET")
+    else:
+        body = json.dumps(params or {}, separators=(",", ":"))
+        sign = sign_request(api_key, api_secret, timestamp, body)
+        url = f"{base_url}{path}"
+        req = urllib.request.Request(url, data=body.encode(), method="POST")
+        req.add_header("Content-Type", "application/json")
+    req.add_header("X-BAPI-API-KEY", api_key)
+    req.add_header("X-BAPI-TIMESTAMP", timestamp)
+    req.add_header("X-BAPI-SIGN", sign)
+    req.add_header("X-BAPI-RECV-WINDOW", RECV_WINDOW)
+    req.add_header("User-Agent", USER_AGENT)
+    req.add_header("X-Referer", "bybit-skill")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return {"retCode": -1, "retMsg": f"HTTP {e.code}: {e.read().decode()[:200]}"}
+    except urllib.error.URLError as e:
+        return {"retCode": -1, "retMsg": str(e)}
+
+
+def get_instrument_info(base_url, symbol):
+    url = f"{base_url}/v5/market/instruments-info?category=linear&symbol={symbol}"
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            items = data.get("result", {}).get("list", [])
+            return items[0] if items else None
+    except Exception:
+        return None
+
+
+def calculate_qty(amount_usdt, price, instrument):
+    if price <= 0:
+        return None
+    lot = instrument.get("lotSizeFilter", {})
+    min_qty = float(lot.get("minOrderQty", "0.001"))
+    qty_step = float(lot.get("qtyStep", "0.001"))
+    raw = amount_usdt / price
+    if raw < min_qty:
+        return None
+    steps = int(raw / qty_step)
+    qty = steps * qty_step
+    if qty < min_qty:
+        return None
+    if qty_step >= 1:
+        return str(int(qty))
+    decimals = len(str(qty_step).rstrip("0").split(".")[-1])
+    return f"{qty:.{decimals}f}"
+
+
+def init_sfp_logs():
+    if not Path(SFP_TRADE_LOG).exists():
+        with open(SFP_TRADE_LOG, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "timestamp", "symbol", "side", "qty", "price", "amount_usdt",
+                "leverage", "grade", "sfp_type", "timeframe", "status", "order_id", "mode",
+            ])
+    if not Path(SFP_EXIT_LOG).exists():
+        with open(SFP_EXIT_LOG, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "timestamp", "symbol", "side", "entry_price",
+                "profit_pct", "trailing_tier", "action",
+            ])
+
+
+def log_sfp_trade(symbol, side, qty, price, amount, leverage, grade, sfp_type, tf, status, oid, mode):
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with open(SFP_TRADE_LOG, "a", newline="") as f:
+        csv.writer(f).writerow([now, symbol, side, qty, price, amount, leverage, grade, sfp_type, tf, status, oid, mode])
+
+
+def log_sfp_exit(symbol, side, entry_price, profit_pct, tier, action):
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with open(SFP_EXIT_LOG, "a", newline="") as f:
+        csv.writer(f).writerow([now, symbol, side, entry_price, profit_pct, tier, action])
+
+
+def load_sfp_state():
+    if Path(SFP_STATE_FILE).exists():
+        with open(SFP_STATE_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+def save_sfp_state(state):
+    with open(SFP_STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def get_current_tier(profit_pct):
+    active = TRAILING_TIERS[0]
+    for min_p, trail in TRAILING_TIERS:
+        if profit_pct >= min_p:
+            active = (min_p, trail)
+    return active
+
+
+def manage_sfp_positions(base_url, api_key, api_secret, initial_sl_pct, is_live, pos_state):
+    """Check open positions and manage trailing stops."""
+    data = auth_request(base_url, "GET", "/v5/position/list",
+                        api_key, api_secret, {"category": "linear", "settleCoin": "USDT"})
+    if data.get("retCode") != 0:
+        return pos_state
+    positions = [p for p in data.get("result", {}).get("list", [])
+                 if float(p.get("size", "0") or "0") > 0]
+
+    if not positions:
+        if pos_state:
+            pos_state = {}
+            save_sfp_state(pos_state)
+        return pos_state
+
+    print(f"\n  --- Position Manager: {len(positions)} open position(s) ---\n")
+    active_symbols = set()
+
+    for pos in positions:
+        symbol = pos.get("symbol", "")
+        side = pos.get("side", "")
+        entry_price = float(pos.get("avgPrice", "0") or "0")
+        mark_price = float(pos.get("markPrice", "0") or "0")
+        position_idx = int(pos.get("positionIdx", "0") or "0")
+        current_sl = float(pos.get("stopLoss", "0") or "0")
+        current_trail = float(pos.get("trailingStop", "0") or "0")
+        leverage = pos.get("leverage", "?")
+
+        if entry_price <= 0 or mark_price <= 0:
+            continue
+        active_symbols.add(symbol)
+
+        if side == "Buy":
+            profit_pct = (mark_price - entry_price) / entry_price * 100
+        else:
+            profit_pct = (entry_price - mark_price) / entry_price * 100
+
+        lev = float(leverage) if leverage != "?" else 1
+        _, tier_trail_pct = get_current_tier(profit_pct)
+        state_key = f"{symbol}_{side}"
+
+        sl_str = f"${current_sl:,.6g}" if current_sl > 0 else "NONE"
+        trail_str = f"${current_trail:,.6g}" if current_trail > 0 else "OFF"
+
+        print(f"  {symbol} {side} | ${entry_price:,.6g} → ${mark_price:,.6g} | "
+              f"PnL: {profit_pct:+.2f}% ({profit_pct*lev:+.1f}% lev) | SL: {sl_str} | Trail: {trail_str}")
+
+        ps = pos_state.get(state_key, {"initial_sl_set": False, "current_tier_pct": 0, "highest_profit": 0})
+        if profit_pct > ps.get("highest_profit", 0):
+            ps["highest_profit"] = profit_pct
+
+        action = None
+        new_sl = None
+        new_trail = None
+
+        if not ps["initial_sl_set"] and current_sl == 0:
+            if side == "Buy":
+                new_sl = round(entry_price * (1 - initial_sl_pct / 100), 6)
+            else:
+                new_sl = round(entry_price * (1 + initial_sl_pct / 100), 6)
+            action = f"SET initial SL at ${new_sl:,.6g} (-{initial_sl_pct}%)"
+            ps["initial_sl_set"] = True
+        elif tier_trail_pct > 0 and tier_trail_pct != ps.get("current_tier_pct", 0):
+            if tier_trail_pct < ps.get("current_tier_pct", 999) or ps.get("current_tier_pct", 0) == 0:
+                new_trail = round(mark_price * tier_trail_pct / 100, 6)
+                label = "ACTIVATE" if ps.get("current_tier_pct", 0) == 0 else "TIGHTEN"
+                action = f"{label} trail to {tier_trail_pct}% (${new_trail:,.6g} distance)"
+                ps["current_tier_pct"] = tier_trail_pct
+
+        if action:
+            print(f"    >> {action}")
+            if is_live:
+                params = {"category": "linear", "symbol": symbol, "positionIdx": position_idx}
+                if new_sl is not None:
+                    params["stopLoss"] = str(new_sl)
+                if new_trail is not None:
+                    params["trailingStop"] = str(new_trail)
+                result = auth_request(base_url, "POST", "/v5/position/trading-stop",
+                                      api_key, api_secret, params)
+                ret = result.get("retCode", -1)
+                if ret == 0:
+                    print(f"    >> APPLIED")
+                elif ret == 10001 and "position idx" in result.get("retMsg", "").lower():
+                    alt_idx = 1 if side == "Buy" else 2
+                    time.sleep(0.3)
+                    params["positionIdx"] = alt_idx
+                    r2 = auth_request(base_url, "POST", "/v5/position/trading-stop",
+                                      api_key, api_secret, params)
+                    print(f"    >> {'APPLIED (hedge)' if r2.get('retCode') == 0 else 'FAILED: ' + r2.get('retMsg', '')}")
+                else:
+                    print(f"    >> FAILED: {result.get('retMsg')}")
+                log_sfp_exit(symbol, side, entry_price, profit_pct, tier_trail_pct, action)
+            else:
+                print(f"    >> [DRY-RUN] Would apply")
+        else:
+            print(f"    >> OK")
+
+        pos_state[state_key] = ps
+
+    closed = [k for k in list(pos_state.keys()) if k.split("_")[0] not in active_symbols]
+    for k in closed:
+        print(f"  Position closed: {k}")
+        del pos_state[k]
+    save_sfp_state(pos_state)
+    return pos_state
+
+
+def execute_sfp_trades(results, base_url, api_key, api_secret, args, traded_symbols):
+    """Trade the best SFP signals. Returns updated traded_symbols set."""
+    min_grade = args.min_grade.upper()
+    tradeable = [r for r in results
+                 if GRADE_ORDER.get(r["grade"], 99) <= GRADE_ORDER.get(min_grade, 2)
+                 and r["sfp"]["candles_ago"] <= 1  # only trade fresh SFPs
+                 and r["symbol"] not in traded_symbols]
+
+    if not tradeable:
+        print(f"\n  No tradeable SFPs (grade {min_grade}+ and fresh).\n")
+        return traded_symbols
+
+    trades_this_cycle = 0
+    for r in tradeable:
+        if trades_this_cycle >= MAX_TRADES_PER_CYCLE:
+            break
+
+        symbol = r["symbol"]
+        grade = r["grade"]
+        sfp = r["sfp"]
+        sfp_type = sfp["type"]
+        side = "Sell" if sfp_type == "BEARISH" else "Buy"
+        price = r["lastPrice"]
+        tf = r["timeframe"]
+
+        print(f"  >> {sfp_type} SFP [{grade}] on {symbol} ({tf}) @ ${price:,.6g}")
+
+        instrument = get_instrument_info(base_url, symbol)
+        if not instrument:
+            print(f"     SKIP: no instrument info")
+            continue
+
+        qty = calculate_qty(args.amount, price, instrument)
+        if not qty:
+            print(f"     SKIP: qty too small")
+            continue
+
+        est_value = float(qty) * price
+        print(f"     Order: {side.upper()} {qty} {symbol} (~${est_value:,.2f}) @ {args.leverage}x")
+
+        if not args.live:
+            print(f"     [DRY-RUN] Would place order")
+            log_sfp_trade(symbol, side, qty, price, est_value, args.leverage,
+                          grade, sfp_type, tf, "dry-run", "N/A", "dry-run")
+            traded_symbols.add(symbol)
+            trades_this_cycle += 1
+        else:
+            # Set leverage
+            auth_request(base_url, "POST", "/v5/position/set-leverage",
+                         api_key, api_secret, {
+                             "category": "linear", "symbol": symbol,
+                             "buyLeverage": str(args.leverage), "sellLeverage": str(args.leverage),
+                         })
+            time.sleep(0.3)
+
+            order_params = {
+                "category": "linear", "symbol": symbol, "side": side,
+                "orderType": "Market", "qty": qty, "positionIdx": 0,
+                "orderLinkId": f"sfp_{symbol}_{int(time.time())}",
+            }
+            result = auth_request(base_url, "POST", "/v5/order/create",
+                                  api_key, api_secret, order_params)
+            ret = result.get("retCode", -1)
+            oid = result.get("result", {}).get("orderId", "N/A")
+
+            if ret == 0:
+                print(f"     FILLED (orderId: {oid})")
+                log_sfp_trade(symbol, side, qty, price, est_value, args.leverage,
+                              grade, sfp_type, tf, "filled", oid, "live")
+                traded_symbols.add(symbol)
+                trades_this_cycle += 1
+            elif ret == 10001 and "position idx" in result.get("retMsg", "").lower():
+                pos_idx = 1 if side == "Buy" else 2
+                order_params["positionIdx"] = pos_idx
+                order_params["orderLinkId"] = f"sfp_{symbol}_{int(time.time())}"
+                time.sleep(0.3)
+                r2 = auth_request(base_url, "POST", "/v5/order/create",
+                                  api_key, api_secret, order_params)
+                if r2.get("retCode") == 0:
+                    oid2 = r2.get("result", {}).get("orderId", "N/A")
+                    print(f"     FILLED hedge (orderId: {oid2})")
+                    log_sfp_trade(symbol, side, qty, price, est_value, args.leverage,
+                                  grade, sfp_type, tf, "filled", oid2, "live")
+                    traded_symbols.add(symbol)
+                    trades_this_cycle += 1
+                else:
+                    print(f"     FAILED: {r2.get('retMsg')}")
+            else:
+                print(f"     FAILED: {result.get('retMsg')}")
+
+        print()
+
+    return traded_symbols
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Bybit SFP Scanner — detect Swing Failure Patterns on high-volume coins"
@@ -532,6 +888,19 @@ def main():
     parser.add_argument("--watch", type=int, default=0,
                         help="Rescan interval in minutes (0 = one-shot)")
     parser.add_argument("--save", action="store_true", help="Save results to JSON")
+    # Trading flags
+    parser.add_argument("--trade", action="store_true",
+                        help="Enable auto-trading on SFP signals (dry-run by default)")
+    parser.add_argument("--live", action="store_true",
+                        help="Execute real trades (requires --trade)")
+    parser.add_argument("--amount", type=float, default=DEFAULT_AMOUNT_USDT,
+                        help=f"USDT per trade (default: {DEFAULT_AMOUNT_USDT})")
+    parser.add_argument("--leverage", type=int, default=DEFAULT_LEVERAGE,
+                        help=f"Leverage (default: {DEFAULT_LEVERAGE}x)")
+    parser.add_argument("--initial-sl", type=float, default=DEFAULT_INITIAL_SL_PCT,
+                        help=f"Initial stop loss %% (default: {DEFAULT_INITIAL_SL_PCT})")
+    parser.add_argument("--min-grade", type=str, default=DEFAULT_MIN_TRADE_GRADE,
+                        help=f"Min SFP grade to trade: A+, A, B, C (default: {DEFAULT_MIN_TRADE_GRADE})")
     args = parser.parse_args()
 
     base_url = TESTNET_URL if args.testnet else MAINNET_URL
@@ -545,12 +914,38 @@ def main():
     else:
         timeframes = DEFAULT_TIMEFRAMES
 
-    print(f"\n[{env_label}] Bybit SFP Scanner")
-    print(f"  Timeframes:    {', '.join(timeframes)}")
-    print(f"  Min volume:    ${args.min_volume}M")
-    print(f"  Pivot lookback: {args.lookback} bars")
-    print(f"  Min sweep:     {args.min_sweep}%")
+    trading_mode = args.trade
+    is_live = args.live and args.trade
+    mode_str = "LIVE" if is_live else ("DRY-RUN" if trading_mode else "SCAN ONLY")
+
+    api_key = api_secret = None
+    pos_state = {}
+    traded_symbols = set()
+
+    if trading_mode:
+        api_key, api_secret = get_credentials()
+        init_sfp_logs()
+        pos_state = load_sfp_state()
+
+        if is_live and not args.testnet:
+            print(f"\n  WARNING: LIVE SFP auto-trading on MAINNET.")
+            print(f"  ${args.amount} per trade | {args.leverage}x | Min grade: {args.min_grade}")
+            confirm = input("\n  Type CONFIRM to proceed: ").strip()
+            if confirm.upper() != "CONFIRM":
+                print("  Cancelled.")
+                sys.exit(0)
+
+    print(f"\n[{env_label}] Bybit SFP Scanner [{mode_str}]")
+    print(f"  Timeframes:      {', '.join(timeframes)}")
+    print(f"  Min volume:      ${args.min_volume}M")
+    print(f"  Pivot lookback:  {args.lookback} bars")
+    print(f"  Min sweep:       {args.min_sweep}%")
     print(f"  Max candles ago: {args.max_ago}")
+    if trading_mode:
+        print(f"  Trade amount:    ${args.amount} @ {args.leverage}x")
+        print(f"  Min grade:       {args.min_grade}")
+        print(f"  Initial SL:      {args.initial_sl}%")
+        print(f"  Trailing tiers:  10%→5% | 30%→3% | 100%→2% | 300%→1.5%")
 
     while True:
         results = run_sfp_scan(
@@ -559,6 +954,16 @@ def main():
         )
         display_results(results, env_label, timeframes)
 
+        # Auto-trade SFP signals
+        if trading_mode and results:
+            traded_symbols = execute_sfp_trades(
+                results, base_url, api_key, api_secret, args, traded_symbols)
+
+        # Manage existing positions
+        if trading_mode:
+            pos_state = manage_sfp_positions(
+                base_url, api_key, api_secret, args.initial_sl, is_live, pos_state)
+
         if args.save:
             ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             save_results(results, f"sfp_scan_{ts}.json")
@@ -566,7 +971,7 @@ def main():
         if args.watch <= 0:
             break
 
-        print(f"  Next scan in {args.watch} minutes... (Ctrl+C to stop)\n")
+        print(f"\n  Next scan in {args.watch} minutes... (Ctrl+C to stop)\n")
         try:
             time.sleep(args.watch * 60)
         except KeyboardInterrupt:
