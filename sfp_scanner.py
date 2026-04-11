@@ -972,13 +972,13 @@ def main():
             break
 
         if trading_mode:
-            print(f"\n  Next scan in {args.watch} min (positions checked every 2 min)... (Ctrl+C to stop)\n")
+            print(f"\n  Next scan in {args.watch} min (positions checked every 1 min)... (Ctrl+C to stop)\n")
         else:
             print(f"\n  Next scan in {args.watch} minutes... (Ctrl+C to stop)\n")
         try:
             remaining = args.watch * 60
             while remaining > 0:
-                wait = min(120, remaining) if trading_mode else remaining
+                wait = min(60, remaining) if trading_mode else remaining
                 time.sleep(wait)
                 remaining -= wait
                 if remaining > 0 and trading_mode:

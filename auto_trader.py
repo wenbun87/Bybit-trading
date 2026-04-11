@@ -657,11 +657,11 @@ def run_auto_trader(args):
               f"${session.total_exposure:,.0f} exposure")
 
         # Wait for next scan, but check positions every 2 min in between
-        print(f"\n  Next scan in {args.interval} min (positions checked every 2 min)... (Ctrl+C to stop)")
+        print(f"\n  Next scan in {args.interval} min (positions checked every 1 min)... (Ctrl+C to stop)")
         try:
             remaining = args.interval * 60
             while remaining > 0:
-                wait = min(120, remaining)  # 2 minutes or whatever is left
+                wait = min(60, remaining)  # 1 minute or whatever is left
                 time.sleep(wait)
                 remaining -= wait
                 if remaining > 0:
