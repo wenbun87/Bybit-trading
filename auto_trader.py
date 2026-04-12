@@ -346,7 +346,10 @@ def manage_positions(base_url, api_key, api_secret, initial_sl_pct, is_live, pos
             save_position_state(pos_state)
         return pos_state
 
-    print(f"\n  --- Position Manager: {len(positions)} open position(s) ---\n")
+    total_unrealised = 0.0
+    print(f"\n  {'='*90}")
+    print(f"  OPEN POSITIONS — {len(positions)} active")
+    print(f"  {'='*90}")
     active_symbols = set()
 
     for pos in positions:
@@ -359,11 +362,14 @@ def manage_positions(base_url, api_key, api_secret, initial_sl_pct, is_live, pos
         current_sl = float(pos.get("stopLoss", "0") or "0")
         current_trail = float(pos.get("trailingStop", "0") or "0")
         leverage = pos.get("leverage", "?")
+        unrealised_pnl = float(pos.get("unrealisedPnl", "0") or "0")
+        position_value = float(pos.get("positionValue", "0") or "0")
 
         if entry_price <= 0 or mark_price <= 0:
             continue
 
         active_symbols.add(symbol)
+        total_unrealised += unrealised_pnl
 
         if side == "Buy":
             profit_pct = (mark_price - entry_price) / entry_price * 100
@@ -374,13 +380,24 @@ def manage_positions(base_url, api_key, api_secret, initial_sl_pct, is_live, pos
         _, tier_trail_pct = get_current_tier(profit_pct)
         state_key = f"{symbol}_{side}"
 
-        sl_str = f"${current_sl:,.6g}" if current_sl > 0 else "NONE"
+        # SL distance from current price
+        if current_sl > 0:
+            if side == "Buy":
+                sl_dist_pct = (mark_price - current_sl) / mark_price * 100
+            else:
+                sl_dist_pct = (current_sl - mark_price) / mark_price * 100
+            sl_str = f"${current_sl:,.6g} ({sl_dist_pct:.1f}% away)"
+        else:
+            sl_str = "NONE ⚠"
+
         trail_str = f"${current_trail:,.6g}" if current_trail > 0 else "OFF"
         tier_str = f"{tier_trail_pct}%" if tier_trail_pct > 0 else "SL only"
+        pnl_color = "+" if unrealised_pnl >= 0 else ""
 
-        print(f"  {symbol} {side} | ${entry_price:,.6g} → ${mark_price:,.6g} | "
-              f"PnL: {profit_pct:+.2f}% ({profit_pct*lev:+.1f}% lev) | "
-              f"SL: {sl_str} | Trail: {trail_str} | Tier: {tier_str}")
+        print(f"\n  {symbol} {side} {lev:.0f}x")
+        print(f"    Entry: ${entry_price:,.6g}  →  Now: ${mark_price:,.6g}  |  Size: {size} (~${position_value:,.2f})")
+        print(f"    P&L:   {pnl_color}${unrealised_pnl:,.2f} USDT  ({profit_pct:+.2f}% / {profit_pct*lev:+.1f}% with leverage)")
+        print(f"    SL:    {sl_str}  |  Trail: {trail_str}  |  Tier: {tier_str}")
 
         ps = pos_state.get(state_key, {
             "initial_sl_set": False, "current_tier_pct": 0, "highest_profit": 0,
@@ -438,6 +455,12 @@ def manage_positions(base_url, api_key, api_secret, initial_sl_pct, is_live, pos
             print(f"    >> OK")
 
         pos_state[state_key] = ps
+
+    # Total P&L summary
+    pnl_sign = "+" if total_unrealised >= 0 else ""
+    print(f"\n  {'─'*50}")
+    print(f"  TOTAL UNREALISED P&L:  {pnl_sign}${total_unrealised:,.2f} USDT")
+    print(f"  {'─'*50}")
 
     # Clean up closed positions
     closed = [k for k in list(pos_state.keys()) if k.split("_")[0] not in active_symbols]
