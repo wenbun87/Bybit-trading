@@ -76,7 +76,7 @@ TRAILING_TIERS = [
     (300,  1.5),   # 300%+ profit: very tight 1.5%
 ]
 
-DEFAULT_INITIAL_SL_PCT = 5.0
+DEFAULT_INITIAL_SL_PCT = 8.0
 
 # ──────────────────────────────────────────────
 # Authenticated API client
