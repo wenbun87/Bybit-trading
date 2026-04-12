@@ -668,6 +668,23 @@ def get_current_tier(profit_pct):
     return active
 
 
+def fetch_ticker_volumes(base_url, symbols):
+    """Fetch 24h turnover for a list of symbols (single API call)."""
+    url = f"{base_url}/v5/market/tickers?category=linear"
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            tickers = data.get("result", {}).get("list", [])
+            wanted = set(symbols)
+            return {
+                t["symbol"]: float(t.get("turnover24h", 0))
+                for t in tickers if t.get("symbol") in wanted
+            }
+    except Exception:
+        return {}
+
+
 def manage_sfp_positions(base_url, api_key, api_secret, initial_sl_pct, is_live, pos_state):
     """Check open positions and manage trailing stops."""
     data = auth_request(base_url, "GET", "/v5/position/list",
@@ -682,6 +699,10 @@ def manage_sfp_positions(base_url, api_key, api_secret, initial_sl_pct, is_live,
             pos_state = {}
             save_sfp_state(pos_state)
         return pos_state
+
+    # Fetch 24h volumes for all open position symbols
+    pos_symbols = [p.get("symbol", "") for p in positions]
+    volumes = fetch_ticker_volumes(base_url, pos_symbols)
 
     total_unrealised = 0.0
     print(f"\n  {'='*90}")
@@ -728,8 +749,10 @@ def manage_sfp_positions(base_url, api_key, api_secret, initial_sl_pct, is_live,
         trail_str = f"${current_trail:,.6g}" if current_trail > 0 else "OFF"
         tier_str = f"{tier_trail_pct}%" if tier_trail_pct > 0 else "SL only"
         pnl_color = "+" if unrealised_pnl >= 0 else ""
+        vol_24h = volumes.get(symbol, 0)
+        vol_str = f"${vol_24h/1e6:,.1f}M" if vol_24h >= 1e6 else f"${vol_24h:,.0f}"
 
-        print(f"\n  {symbol} {side} {lev:.0f}x")
+        print(f"\n  {symbol} {side} {lev:.0f}x  |  24h Vol: {vol_str}")
         print(f"    Entry: ${entry_price:,.6g}  →  Now: ${mark_price:,.6g}  |  Size: {size} (~${position_value:,.2f})")
         print(f"    P&L:   {pnl_color}${unrealised_pnl:,.2f} USDT  ({profit_pct:+.2f}% / {profit_pct*lev:+.1f}% with leverage)")
         print(f"    SL:    {sl_str}  |  Trail: {trail_str}  |  Tier: {tier_str}")
