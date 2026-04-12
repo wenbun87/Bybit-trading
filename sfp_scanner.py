@@ -815,8 +815,14 @@ def execute_sfp_trades(results, base_url, api_key, api_secret, args, traded_symb
         est_value = float(qty) * price
         print(f"     Order: {side.upper()} {qty} {symbol} (~${est_value:,.2f}) @ {args.leverage}x")
 
+        # Calculate stop loss price (direction-aware, set atomically with order)
+        if side == "Buy":
+            sl_price = round(price * (1 - args.initial_sl / 100), 6)
+        else:
+            sl_price = round(price * (1 + args.initial_sl / 100), 6)
+
         if not args.live:
-            print(f"     [DRY-RUN] Would place order")
+            print(f"     [DRY-RUN] Would place order with SL at ${sl_price:,.6g} (-{args.initial_sl}%)")
             log_sfp_trade(symbol, side, qty, price, est_value, args.leverage,
                           grade, sfp_type, tf, "dry-run", "N/A", "dry-run")
             traded_symbols.add(symbol)
@@ -830,10 +836,12 @@ def execute_sfp_trades(results, base_url, api_key, api_secret, args, traded_symb
                          })
             time.sleep(0.3)
 
+            print(f"     Placing order with SL at ${sl_price:,.6g} (-{args.initial_sl}%)...", end=" ")
             order_params = {
                 "category": "linear", "symbol": symbol, "side": side,
                 "orderType": "Market", "qty": qty, "positionIdx": 0,
                 "orderLinkId": f"sfp_{symbol}_{int(time.time())}",
+                "stopLoss": str(sl_price),
             }
             result = auth_request(base_url, "POST", "/v5/order/create",
                                   api_key, api_secret, order_params)
@@ -841,11 +849,18 @@ def execute_sfp_trades(results, base_url, api_key, api_secret, args, traded_symb
             oid = result.get("result", {}).get("orderId", "N/A")
 
             if ret == 0:
-                print(f"     FILLED (orderId: {oid})")
+                print(f"FILLED (orderId: {oid})")
                 log_sfp_trade(symbol, side, qty, price, est_value, args.leverage,
                               grade, sfp_type, tf, "filled", oid, "live")
                 traded_symbols.add(symbol)
                 trades_this_cycle += 1
+                # Mark SL as already set so position manager doesn't re-set it
+                state_key = f"{symbol}_{side}"
+                pos_state = load_sfp_state()
+                pos_state[state_key] = {
+                    "initial_sl_set": True, "current_tier_pct": 0, "highest_profit": 0,
+                }
+                save_sfp_state(pos_state)
             elif ret == 10001 and "position idx" in result.get("retMsg", "").lower():
                 pos_idx = 1 if side == "Buy" else 2
                 order_params["positionIdx"] = pos_idx
@@ -855,11 +870,17 @@ def execute_sfp_trades(results, base_url, api_key, api_secret, args, traded_symb
                                   api_key, api_secret, order_params)
                 if r2.get("retCode") == 0:
                     oid2 = r2.get("result", {}).get("orderId", "N/A")
-                    print(f"     FILLED hedge (orderId: {oid2})")
+                    print(f"FILLED hedge (orderId: {oid2})")
                     log_sfp_trade(symbol, side, qty, price, est_value, args.leverage,
                                   grade, sfp_type, tf, "filled", oid2, "live")
                     traded_symbols.add(symbol)
                     trades_this_cycle += 1
+                    state_key = f"{symbol}_{side}"
+                    pos_state = load_sfp_state()
+                    pos_state[state_key] = {
+                        "initial_sl_set": True, "current_tier_pct": 0, "highest_profit": 0,
+                    }
+                    save_sfp_state(pos_state)
                 else:
                     print(f"     FAILED: {r2.get('retMsg')}")
             else:

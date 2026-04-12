@@ -61,6 +61,7 @@ MAX_TRADES_PER_CYCLE = 2        # max trades per scan cycle
 MAX_TRADES_PER_DAY = 6          # max trades in 24 hours
 MAX_TOTAL_EXPOSURE_USDT = 3000  # stop opening if total exceeds this
 DEFAULT_LEVERAGE = 10           # 10x leverage
+MIN_VOLUME_24H = 20_000_000     # only trade coins with >$20M 24h volume
 
 TRADE_LOG_FILE = "trade_log.csv"
 EXIT_LOG_FILE = "exit_log.csv"
@@ -229,8 +230,9 @@ def set_leverage(base_url: str, api_key: str, api_secret: str,
 
 
 def place_market_order(base_url: str, api_key: str, api_secret: str,
-                       symbol: str, qty: str, side: str = "Buy") -> dict:
-    """Place a market order on linear perpetuals."""
+                       symbol: str, qty: str, side: str = "Buy",
+                       stop_loss: float | None = None) -> dict:
+    """Place a market order on linear perpetuals with optional stop loss."""
     order_link_id = f"momentum_{symbol}_{int(time.time())}"
     params = {
         "category": "linear",
@@ -241,6 +243,8 @@ def place_market_order(base_url: str, api_key: str, api_secret: str,
         "orderLinkId": order_link_id,
         "positionIdx": 0,  # one-way mode
     }
+    if stop_loss is not None:
+        params["stopLoss"] = str(stop_loss)
     return api_request(base_url, "POST", "/v5/order/create",
                        api_key, api_secret, params)
 
@@ -515,7 +519,8 @@ def run_auto_trader(args):
     print(f"  Max per cycle:   {MAX_TRADES_PER_CYCLE} trades")
     print(f"  Max per day:     {MAX_TRADES_PER_DAY} trades")
     print(f"  Max exposure:    ${MAX_TOTAL_EXPOSURE_USDT:,}")
-    print(f"  Initial SL:      {args.initial_sl}%")
+    print(f"  Initial SL:      {args.initial_sl}% (set with order)")
+    print(f"  Min 24h volume:  ${MIN_VOLUME_24H/1e6:.0f}M")
     print(f"  Trailing tiers:  10%→5% | 30%→3% | 100%→2% | 300%→1.5%")
     print(f"  Trade log:       {TRADE_LOG_FILE}")
     print(f"  Exit log:        {EXIT_LOG_FILE}")
@@ -567,9 +572,15 @@ def run_auto_trader(args):
                 price = r["lastPrice"]
                 signals = r["signals"]
 
-                print(f"  >> {symbol} | Score: {score} | Price: ${price:,.6g} | 24h: {r['change24h']:+.1f}%")
+                turnover = r.get("turnover24h", 0)
+                print(f"  >> {symbol} | Score: {score} | Price: ${price:,.6g} | 24h: {r['change24h']:+.1f}% | Vol: ${turnover/1e6:,.1f}M")
                 print(f"     Vol: {signals['volume_anomaly']['detail']}")
                 print(f"     OI:  {signals['oi_surge']['detail']}")
+
+                # Volume filter: skip coins with < $20M 24h volume
+                if turnover < MIN_VOLUME_24H:
+                    print(f"     SKIP: 24h volume ${turnover/1e6:,.1f}M < ${MIN_VOLUME_24H/1e6:.0f}M minimum")
+                    continue
 
                 # Safety checks
                 can_trade, reason = session.can_trade(symbol)
@@ -591,23 +602,27 @@ def run_auto_trader(args):
                 est_value = float(qty) * price
                 print(f"     Order: BUY {qty} {symbol} (~${est_value:,.2f}) @ {args.leverage}x leverage")
 
+                # Calculate stop loss price (set atomically with the order)
+                sl_price = round(price * (1 - args.initial_sl / 100), 6)
+
                 if not args.live:
                     # Dry run
-                    print(f"     [DRY-RUN] Would place order — skipping")
+                    print(f"     [DRY-RUN] Would place order with SL at ${sl_price:,.6g} (-{args.initial_sl}%)")
                     log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                               score, signals, "dry-run", "N/A", "dry-run")
                     session.record_trade(symbol, est_value)
                     trades_this_cycle += 1
                 else:
-                    # LIVE: set leverage then place order
+                    # LIVE: set leverage then place order with stop loss
                     print(f"     Setting leverage to {args.leverage}x...", end=" ")
                     lev_ok = set_leverage(base_url, api_key, api_secret, symbol, args.leverage)
                     print("OK" if lev_ok else "WARN (may already be set)")
 
                     time.sleep(0.3)  # rate limit between POST calls
 
-                    print(f"     Placing market order...", end=" ")
-                    result = place_market_order(base_url, api_key, api_secret, symbol, qty)
+                    print(f"     Placing market order with SL at ${sl_price:,.6g} (-{args.initial_sl}%)...", end=" ")
+                    result = place_market_order(base_url, api_key, api_secret, symbol, qty,
+                                                stop_loss=sl_price)
                     ret_code = result.get("retCode", -1)
                     order_id = result.get("result", {}).get("orderId", "N/A")
 
@@ -617,6 +632,12 @@ def run_auto_trader(args):
                                   score, signals, "filled", order_id, "live")
                         session.record_trade(symbol, est_value)
                         trades_this_cycle += 1
+                        # Mark SL as already set so position manager doesn't re-set it
+                        state_key = f"{symbol}_Buy"
+                        pos_state[state_key] = {
+                            "initial_sl_set": True, "current_tier_pct": 0, "highest_profit": 0,
+                        }
+                        save_position_state(pos_state)
                     elif ret_code == 10001 and "position idx" in result.get("retMsg", "").lower():
                         # Hedge mode — retry with positionIdx=1 (long)
                         print(f"hedge mode detected, retrying...", end=" ")
@@ -626,6 +647,7 @@ def run_auto_trader(args):
                             "category": "linear", "symbol": symbol,
                             "side": "Buy", "orderType": "Market", "qty": qty,
                             "orderLinkId": order_link_id, "positionIdx": 1,
+                            "stopLoss": str(sl_price),
                         }
                         result2 = api_request(base_url, "POST", "/v5/order/create",
                                               api_key, api_secret, hedge_params)
@@ -636,6 +658,11 @@ def run_auto_trader(args):
                                       score, signals, "filled", oid, "live")
                             session.record_trade(symbol, est_value)
                             trades_this_cycle += 1
+                            state_key = f"{symbol}_Buy"
+                            pos_state[state_key] = {
+                                "initial_sl_set": True, "current_tier_pct": 0, "highest_profit": 0,
+                            }
+                            save_position_state(pos_state)
                         else:
                             print(f"FAILED: {result2.get('retMsg')}")
                             log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
