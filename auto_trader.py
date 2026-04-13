@@ -61,7 +61,7 @@ MAX_TRADES_PER_CYCLE = 2        # max trades per scan cycle
 MAX_TRADES_PER_DAY = 6          # max trades in 24 hours
 MAX_TOTAL_EXPOSURE_USDT = 3000  # stop opening if total exceeds this
 DEFAULT_LEVERAGE = 10           # 10x leverage
-MIN_VOLUME_24H = 20_000_000     # only trade coins with >$20M 24h volume
+MIN_VOLUME_24H = 5_000_000      # only trade coins with >$5M 24h volume
 
 TRADE_LOG_FILE = "trade_log.csv"
 EXIT_LOG_FILE = "exit_log.csv"
@@ -566,7 +566,7 @@ def run_auto_trader(args):
     print(f"  Max per day:     {MAX_TRADES_PER_DAY} trades")
     print(f"  Max exposure:    ${MAX_TOTAL_EXPOSURE_USDT:,}")
     print(f"  Initial SL:      {args.initial_sl}% (set with order)")
-    print(f"  Min 24h volume:  ${MIN_VOLUME_24H/1e6:.0f}M")
+    print(f"  Min 24h volume:  ${MIN_VOLUME_24H/1e6:.0f}M (filters micro-caps)")
     print(f"  Trailing tiers:  10%→5% | 30%→3% | 100%→2% | 300%→1.5%")
     print(f"  Trade log:       {TRADE_LOG_FILE}")
     print(f"  Exit log:        {EXIT_LOG_FILE}")

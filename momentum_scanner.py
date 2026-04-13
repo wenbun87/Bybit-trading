@@ -424,10 +424,23 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
     # Sort by 24h turnover to prioritize liquid coins for deep analysis
     candidates.sort(key=lambda x: x["turnover24h"], reverse=True)
 
-    # Cap deep analysis at top 80 by volume to control API calls
-    scan_pool = candidates[:80]
+    # Two-pool approach to catch both liquid movers AND emerging spikes:
+    #   Pool A: Top 50 by 24h volume (established, liquid coins)
+    #   Pool B: Top 30 by 24h % change (fast movers — catches early spikes
+    #           that don't yet have huge absolute volume)
+    pool_a = candidates[:50]
+    pool_a_symbols = {c["symbol"] for c in pool_a}
 
-    print(f"  {len(tickers)} perps found → {len(candidates)} candidates after filters → scanning top {len(scan_pool)}...")
+    # Pool B: sort by % change, exclude coins already in Pool A, require min $1M turnover
+    remaining = [c for c in candidates if c["symbol"] not in pool_a_symbols
+                 and c["turnover24h"] >= 1_000_000]
+    remaining.sort(key=lambda x: x["change24h"], reverse=True)
+    pool_b = remaining[:30]
+
+    scan_pool = pool_a + pool_b
+
+    print(f"  {len(tickers)} perps found → {len(candidates)} candidates after filters")
+    print(f"  Scan pool: {len(pool_a)} by volume + {len(pool_b)} by % change = {len(scan_pool)} coins")
     print()
 
     results = []
