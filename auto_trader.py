@@ -6,8 +6,8 @@ Runs the momentum scanner on a schedule, opens positions on high-scoring
 coins, AND manages exits with adaptive trailing stops — all in one script.
 
   Entry:  Momentum score 60+ → market buy $500 perp
-  Exit:   -5% initial SL → trailing stops tighten as profit grows
-          10%+ → 5% trail | 30%+ → 3% | 100%+ → 2% | 300%+ → 1.5%
+  Exit:   -8% initial SL → trailing stops tighten as profit grows
+          10%+ → 8% trail | 30%+ → 6% | 100%+ → 3% | 300%+ → 2%
 
 SAFETY FEATURES:
   - Starts in DRY-RUN mode by default (no real trades until you pass --live)
@@ -70,10 +70,10 @@ STATE_FILE = "position_state.json"
 # Trailing stop tiers: (min_profit_pct, trailing_stop_pct)
 TRAILING_TIERS = [
     (0,    0),     # below 10%: no trailing stop, just initial SL
-    (10,   5.0),   # 10%+ profit: trail at 5% distance
-    (30,   3.0),   # 30%+ profit: tighten to 3%
-    (100,  2.0),   # 100%+ profit: tighten to 2%
-    (300,  1.5),   # 300%+ profit: very tight 1.5%
+    (10,   8.0),   # 10%+ profit: trail at 8% distance
+    (30,   6.0),   # 30%+ profit: tighten to 6%
+    (100,  3.0),   # 100%+ profit: tighten to 3%
+    (300,  2.0),   # 300%+ profit: tight 2%
 ]
 
 DEFAULT_INITIAL_SL_PCT = 8.0
@@ -567,7 +567,7 @@ def run_auto_trader(args):
     print(f"  Max exposure:    ${MAX_TOTAL_EXPOSURE_USDT:,}")
     print(f"  Initial SL:      {args.initial_sl}% (set with order)")
     print(f"  Min 24h volume:  ${MIN_VOLUME_24H/1e6:.0f}M (filters micro-caps)")
-    print(f"  Trailing tiers:  10%→5% | 30%→3% | 100%→2% | 300%→1.5%")
+    print(f"  Trailing tiers:  10%→8% | 30%→6% | 100%→3% | 300%→2%")
     print(f"  Trade log:       {TRADE_LOG_FILE}")
     print(f"  Exit log:        {EXIT_LOG_FILE}")
 

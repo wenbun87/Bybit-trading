@@ -76,10 +76,10 @@ DEFAULT_MIN_TRADE_GRADE = "B"  # only trade B or better
 
 TRAILING_TIERS = [
     (0,    0),
-    (10,   5.0),
-    (30,   3.0),
-    (100,  2.0),
-    (300,  1.5),
+    (10,   8.0),
+    (30,   6.0),
+    (100,  3.0),
+    (300,  2.0),
 ]
 
 SFP_TRADE_LOG = "sfp_trade_log.csv"
@@ -1014,7 +1014,7 @@ def main():
         print(f"  Trade amount:    ${args.amount} @ {args.leverage}x")
         print(f"  Min grade:       {args.min_grade}")
         print(f"  Initial SL:      {args.initial_sl}%")
-        print(f"  Trailing tiers:  10%→5% | 30%→3% | 100%→2% | 300%→1.5%")
+        print(f"  Trailing tiers:  10%→8% | 30%→6% | 100%→3% | 300%→2%")
 
     while True:
         results = run_sfp_scan(
