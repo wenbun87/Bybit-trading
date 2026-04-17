@@ -62,6 +62,7 @@ MAX_TRADES_PER_DAY = 6          # max trades in 24 hours
 MAX_TOTAL_EXPOSURE_USDT = 3000  # stop opening if total exceeds this
 DEFAULT_LEVERAGE = 10           # 10x leverage
 MIN_VOLUME_24H = 5_000_000      # only trade coins with >$5M 24h volume
+RE_ENTRY_COOLDOWN_HOURS = 6     # allow re-entry on same symbol after this cooldown (ARIA-style round 2)
 
 TRADE_LOG_FILE = "trade_log.csv"
 EXIT_LOG_FILE = "exit_log.csv"
@@ -506,7 +507,8 @@ class TradingSession:
         self.max_per_cycle = max_per_cycle
         self.max_per_day = max_per_day
         self.max_exposure = max_exposure
-        self.traded_symbols: set[str] = set()
+        # Map symbol -> unix_ts of last trade (enables ARIA-style re-entry after cooldown)
+        self.traded_symbols: dict[str, float] = {}
         self.trades_today = 0
         self.today_date = datetime.now(timezone.utc).date()
         self.total_exposure = 0.0
@@ -520,7 +522,10 @@ class TradingSession:
             self.today_date = current_date
 
         if symbol in self.traded_symbols:
-            return False, f"already traded {symbol} this session"
+            elapsed_hrs = (time.time() - self.traded_symbols[symbol]) / 3600
+            if elapsed_hrs < RE_ENTRY_COOLDOWN_HOURS:
+                remaining = RE_ENTRY_COOLDOWN_HOURS - elapsed_hrs
+                return False, f"traded {symbol} {elapsed_hrs:.1f}h ago (cooldown {remaining:.1f}h left)"
         if self.trades_today >= self.max_per_day:
             return False, f"daily limit reached ({self.max_per_day} trades)"
         if self.total_exposure >= self.max_exposure:
@@ -528,7 +533,7 @@ class TradingSession:
         return True, ""
 
     def record_trade(self, symbol: str, amount: float):
-        self.traded_symbols.add(symbol)
+        self.traded_symbols[symbol] = time.time()
         self.trades_today += 1
         self.total_exposure += amount
 
@@ -567,6 +572,7 @@ def run_auto_trader(args):
     print(f"  Max exposure:    ${MAX_TOTAL_EXPOSURE_USDT:,}")
     print(f"  Initial SL:      {args.initial_sl}% (set with order)")
     print(f"  Min 24h volume:  ${MIN_VOLUME_24H/1e6:.0f}M (filters micro-caps)")
+    print(f"  Re-entry after:  {RE_ENTRY_COOLDOWN_HOURS}h cooldown (ARIA-style round 2)")
     print(f"  Trailing tiers:  10%→8% | 30%→6% | 100%→3% | 300%→2%")
     print(f"  Trade log:       {TRADE_LOG_FILE}")
     print(f"  Exit log:        {EXIT_LOG_FILE}")

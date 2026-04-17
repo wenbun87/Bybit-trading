@@ -46,12 +46,15 @@ MIN_CALL_INTERVAL_POST = 0.32  # 320ms between POST requests
 
 # Scoring weights (sum = 1.0)
 WEIGHTS = {
-    "volume_anomaly": 0.30,
-    "price_accel":    0.25,
+    "volume_anomaly": 0.25,
+    "price_accel":    0.20,
     "oi_surge":       0.20,
-    "funding_shift":  0.10,
+    "squeeze_setup":  0.20,   # negative funding + rising OI + rising price
     "streak":         0.15,
 }
+
+# Distribution risk caps the penalty at -30 points
+DISTRIBUTION_PENALTY_CAP = 30.0
 
 # Thresholds
 VOLUME_ALERT_MULTIPLIER = 3.0     # 3x average volume = notable
@@ -146,6 +149,21 @@ def fetch_funding_history(base_url: str, symbol: str) -> list[dict]:
         "category": "linear",
         "symbol": symbol,
         "limit": "10",
+    })
+    return data.get("result", {}).get("list", [])
+
+
+def fetch_long_short_ratio(base_url: str, symbol: str) -> list[dict]:
+    """
+    Fetch long/short account ratio (Bybit /v5/market/account-ratio).
+    Ratio > 1 = more longs than shorts; < 1 = more shorts.
+    A ratio dropping hard while price rises signals short capitulation (bullish squeeze fuel).
+    """
+    data = api_get(base_url, "/v5/market/account-ratio", {
+        "category": "linear",
+        "symbol": symbol,
+        "period": "5min",
+        "limit": "12",  # last hour of data
     })
     return data.get("result", {}).get("list", [])
 
@@ -364,17 +382,170 @@ def analyze_streak(klines: list[list]) -> dict:
     }
 
 
+def analyze_squeeze_setup(funding_data: list[dict], klines: list[list],
+                          oi_data: list[dict], ls_ratio: list[dict]) -> dict:
+    """
+    Detect the 'crime coin squeeze setup' described in @au_xbt's tweet:
+      - Funding is NEGATIVE (shorts are paying longs → crowd is short)
+      - OI is RISING (new short positions stacking)
+      - Price is rising or stable (shorts underwater = squeeze fuel)
+      - Long/short account ratio dropping while price holds = retail shorting into strength
+
+    When all four align, market-makers often blow the shorts out with a coordinated rip.
+    This scores the SETUP (pre-pump) rather than the pump itself — the earlier the better.
+    """
+    if len(funding_data) < 1 or len(klines) < 6 or len(oi_data) < 2:
+        return {"score": 0, "detail": "insufficient data"}
+
+    try:
+        current_funding = float(funding_data[0].get("fundingRate", 0)) * 100
+        recent_oi = float(oi_data[0].get("openInterest", 0))
+        oldest_oi = float(oi_data[-1].get("openInterest", 0))
+        closes = [float(k[4]) for k in klines]
+    except (ValueError, TypeError):
+        return {"score": 0, "detail": "parse error"}
+
+    if oldest_oi <= 0:
+        return {"score": 0, "detail": "no OI baseline"}
+
+    oi_change = ((recent_oi - oldest_oi) / oldest_oi) * 100
+    roc_6h = ((closes[-1] - closes[-6]) / closes[-6]) * 100 if closes[-6] > 0 else 0
+
+    # Component scores
+    # 1. Negative funding (shorts paying) — stronger negative = bigger setup
+    funding_score = 0
+    if current_funding < 0:
+        funding_score = min(40, abs(current_funding) / 0.05 * 40)  # -0.05% funding = 40 pts
+
+    # 2. OI rising — new shorts piling in while price holds
+    oi_score = 0
+    if oi_change > 0:
+        oi_score = min(30, oi_change / 10 * 30)  # +10% OI = 30 pts
+
+    # 3. Price stable-to-rising (NOT already dumping)
+    price_score = 0
+    if -2 <= roc_6h <= 15:  # sweet spot: flat to modestly up (not yet pumped)
+        price_score = 30
+    elif 15 < roc_6h <= 30:  # still usable but squeeze already starting
+        price_score = 20
+    elif roc_6h < -2:
+        price_score = 0
+
+    # 4. Long/short ratio bonus — if we can see retail shorting, add up to 20 pts
+    ls_bonus = 0
+    if ls_ratio and len(ls_ratio) >= 2:
+        try:
+            # Bybit returns newest first: buyRatio + sellRatio (sum = 1)
+            newest = float(ls_ratio[0].get("buyRatio", 0.5))
+            oldest = float(ls_ratio[-1].get("buyRatio", 0.5))
+            # buyRatio dropping (more shorts) while price holds = classic setup
+            if newest < oldest and newest < 0.5:
+                ls_bonus = min(20, (0.5 - newest) * 100)
+        except (ValueError, TypeError):
+            pass
+
+    score = min(100, funding_score + oi_score + price_score + ls_bonus)
+
+    signals_found = []
+    if current_funding < 0:
+        signals_found.append(f"fund {current_funding:+.4f}%")
+    if oi_change > 0:
+        signals_found.append(f"OI {oi_change:+.1f}%")
+    if ls_bonus > 0:
+        signals_found.append("retail short")
+
+    detail = " + ".join(signals_found) if signals_found else "no setup"
+
+    return {
+        "score": round(score, 1),
+        "funding": round(current_funding, 4),
+        "oi_change_pct": round(oi_change, 2),
+        "roc_6h": round(roc_6h, 2),
+        "ls_bonus": round(ls_bonus, 1),
+        "detail": detail,
+    }
+
+
+def analyze_distribution_risk(klines: list[list], oi_data: list[dict]) -> dict:
+    """
+    Penalty signal: is this a late/distribution setup rather than an early entry?
+    Red flags (crime coin exit signs):
+      - Price is near 48h high AND already up a lot
+      - OI dropping while price still high = smart money unloading
+      - Very extended move (50%+) with decelerating momentum
+
+    Returns a penalty value (0 to DISTRIBUTION_PENALTY_CAP) to subtract from score.
+    """
+    if len(klines) < 12 or len(oi_data) < 2:
+        return {"penalty": 0, "detail": "insufficient data"}
+
+    try:
+        closes = [float(k[4]) for k in klines]
+        highs = [float(k[2]) for k in klines]
+        recent_oi = float(oi_data[0].get("openInterest", 0))
+        oldest_oi = float(oi_data[-1].get("openInterest", 0))
+    except (ValueError, TypeError):
+        return {"penalty": 0, "detail": "parse error"}
+
+    current = closes[-1]
+    high_48h = max(highs)
+    low_12h = min(closes[-12:])
+
+    # How extended is the move?
+    move_from_low = ((current - low_12h) / low_12h * 100) if low_12h > 0 else 0
+
+    # Distance from high (smaller = closer to top)
+    dist_from_high = ((high_48h - current) / high_48h * 100) if high_48h > 0 else 0
+
+    # OI direction
+    oi_change = ((recent_oi - oldest_oi) / oldest_oi * 100) if oldest_oi > 0 else 0
+
+    penalty = 0
+    reasons = []
+
+    # Red flag 1: already up 50%+ from 12h low
+    if move_from_low >= 50:
+        penalty += 15
+        reasons.append(f"+{move_from_low:.0f}% from 12h low")
+
+    # Red flag 2: within 2% of 48h high (late in the move)
+    if dist_from_high <= 2 and move_from_low >= 30:
+        penalty += 10
+        reasons.append("at 48h high")
+
+    # Red flag 3: OI dropping while price still elevated = distribution
+    if oi_change < -3 and move_from_low >= 20:
+        penalty += 15
+        reasons.append(f"OI {oi_change:.1f}% (distrib)")
+
+    penalty = min(DISTRIBUTION_PENALTY_CAP, penalty)
+
+    return {
+        "penalty": round(penalty, 1),
+        "move_from_low": round(move_from_low, 1),
+        "dist_from_high": round(dist_from_high, 2),
+        "oi_change": round(oi_change, 2),
+        "detail": " | ".join(reasons) if reasons else "clean",
+    }
+
+
 # ──────────────────────────────────────────────
 # Composite scoring
 # ──────────────────────────────────────────────
 
 def compute_momentum_score(signals: dict) -> float:
-    """Weighted composite score from all signals."""
+    """
+    Weighted composite score from all signals, minus distribution penalty.
+    Penalty weeds out late/distribution entries (the kind that trap you at the top).
+    """
     score = 0
     for key, weight in WEIGHTS.items():
         signal = signals.get(key, {})
         score += signal.get("score", 0) * weight
-    return round(score, 1)
+
+    penalty = signals.get("distribution_risk", {}).get("penalty", 0)
+    final = max(0, score - penalty)
+    return round(final, 1)
 
 
 # ──────────────────────────────────────────────
@@ -454,6 +625,7 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
         klines = fetch_klines(base_url, symbol, interval="60", limit=48)  # 48h of 1h candles
         oi_data = fetch_open_interest(base_url, symbol)
         funding_data = fetch_funding_history(base_url, symbol)
+        ls_ratio = fetch_long_short_ratio(base_url, symbol)
 
         # Run all signal analyzers
         signals = {
@@ -462,6 +634,8 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
             "oi_surge": analyze_oi_surge(oi_data),
             "funding_shift": analyze_funding_shift(funding_data),
             "streak": analyze_streak(klines),
+            "squeeze_setup": analyze_squeeze_setup(funding_data, klines, oi_data, ls_ratio),
+            "distribution_risk": analyze_distribution_risk(klines, oi_data),
         }
 
         momentum_score = compute_momentum_score(signals)
@@ -509,25 +683,26 @@ def display_results(results: list[dict], env_label: str):
     # Header
     print(
         f"{'#':>3}  {'Symbol':<14} {'Price':>12} {'24h%':>8} {'Score':>6} {'Alert':<12}"
-        f"  {'Vol':>6} {'PrAcc':>6} {'OI':>6} {'Fund':>6} {'Strk':>6}"
+        f"  {'Vol':>5} {'PrAcc':>5} {'OI':>5} {'Sqz':>5} {'Strk':>5} {'Pen':>5}"
         f"  {'Key Signal':<30}"
     )
-    print("-" * 130)
+    print("-" * 140)
 
     for i, r in enumerate(results, 1):
         s = r["signals"]
         vol_s = s["volume_anomaly"]["score"]
         pa_s = s["price_accel"]["score"]
         oi_s = s["oi_surge"]["score"]
-        fn_s = s["funding_shift"]["score"]
+        sq_s = s["squeeze_setup"]["score"]
         st_s = s["streak"]["score"]
+        pen = s["distribution_risk"]["penalty"]
 
         # Pick the strongest signal as the key signal
         signal_scores = [
             ("volume_anomaly", vol_s),
             ("price_accel", pa_s),
             ("oi_surge", oi_s),
-            ("funding_shift", fn_s),
+            ("squeeze_setup", sq_s),
             ("streak", st_s),
         ]
         top_signal_name, _ = max(signal_scores, key=lambda x: x[1])
@@ -537,11 +712,11 @@ def display_results(results: list[dict], env_label: str):
 
         print(
             f"{i:>3}  {r['symbol']:<14} {r['lastPrice']:>12,.6g} {r['change24h']:>+7.1f}% {r['momentum_score']:>5.1f} {alert:<12}"
-            f"  {vol_s:>5.0f} {pa_s:>5.0f} {oi_s:>5.0f} {fn_s:>5.0f} {st_s:>5.0f}"
+            f"  {vol_s:>5.0f} {pa_s:>5.0f} {oi_s:>5.0f} {sq_s:>5.0f} {st_s:>5.0f} {-pen:>5.0f}"
             f"  {key_signal:<30}"
         )
 
-    print("-" * 130)
+    print("-" * 140)
 
     # Detail section for top 5
     print(f"\n{'─'*60}")
@@ -550,12 +725,16 @@ def display_results(results: list[dict], env_label: str):
 
     for r in results[:5]:
         s = r["signals"]
-        print(f"\n  {r['symbol']}  (Score: {r['momentum_score']})  24h: {r['change24h']:+.1f}%")
+        pen = s["distribution_risk"]["penalty"]
+        pen_str = f"  [PENALTY -{pen:.0f}]" if pen > 0 else ""
+        print(f"\n  {r['symbol']}  (Score: {r['momentum_score']}){pen_str}  24h: {r['change24h']:+.1f}%")
         print(f"    Volume:   {s['volume_anomaly']['detail']}")
         print(f"    PrAccel:  {s['price_accel']['detail']}")
         print(f"    OI Surge: {s['oi_surge']['detail']}")
         print(f"    Funding:  {s['funding_shift']['detail']}")
         print(f"    Streak:   {s['streak']['detail']}")
+        print(f"    Squeeze:  {s['squeeze_setup']['detail']} (score {s['squeeze_setup']['score']})")
+        print(f"    DistRisk: {s['distribution_risk']['detail']}")
 
     print(f"\n{'─'*60}")
     print(f"Score 80+ = EXTREME momentum (coin may already be spiking)")
@@ -588,7 +767,8 @@ def main():
 
     print(f"\n[{env_label}] Bybit Momentum Scanner")
     print(f"  Weights: Vol={WEIGHTS['volume_anomaly']:.0%} PrAcc={WEIGHTS['price_accel']:.0%} "
-          f"OI={WEIGHTS['oi_surge']:.0%} Fund={WEIGHTS['funding_shift']:.0%} Streak={WEIGHTS['streak']:.0%}")
+          f"OI={WEIGHTS['oi_surge']:.0%} Squeeze={WEIGHTS['squeeze_setup']:.0%} Streak={WEIGHTS['streak']:.0%}")
+    print(f"  Distribution penalty: up to -{DISTRIBUTION_PENALTY_CAP:.0f} pts for late/top-heavy setups")
     print(f"  Filters: min turnover ${MIN_TURNOVER_24H:,} | min change {MIN_PRICE_CHANGE_PCT}% | USDT pairs only")
 
     while True:
