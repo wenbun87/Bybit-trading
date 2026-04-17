@@ -56,13 +56,61 @@ WEIGHTS = {
 # Trailing stop tiers (must match position_manager.py)
 TRAILING_TIERS = [
     (0,    0),
-    (10,   5.0),
-    (30,   3.0),
-    (100,  2.0),
-    (300,  1.5),
+    (10,   8.0),
+    (30,   6.0),
+    (100,  3.0),
+    (300,  2.0),
 ]
 
-DEFAULT_INITIAL_SL_PCT = 5.0
+DEFAULT_INITIAL_SL_PCT = 8.0
+
+# ──────────────────────────────────────────────
+# Strategy presets for --compare mode
+# ──────────────────────────────────────────────
+#
+# Each strategy defines:
+#   - initial_sl_pct: float or None (None = no stop, only liquidation)
+#   - trail_tiers:   list of (min_profit_pct, trail_pct) tuples, or []
+#   - amount_mult:   size multiplier vs base amount (1.0 = same, 0.5 = half)
+#   - leverage:      None to use CLI leverage, or override
+#
+STRATEGIES = {
+    "current": {
+        "name": "Current (8% SL + wider trail)",
+        "initial_sl_pct": 8.0,
+        "trail_tiers": [(0, 0), (10, 8.0), (30, 6.0), (100, 3.0), (300, 2.0)],
+        "amount_mult": 1.0,
+        "leverage_override": None,
+    },
+    "old_tight": {
+        "name": "Old tight trail (5% SL, 5/3/2/1.5%)",
+        "initial_sl_pct": 5.0,
+        "trail_tiers": [(0, 0), (10, 5.0), (30, 3.0), (100, 2.0), (300, 1.5)],
+        "amount_mult": 1.0,
+        "leverage_override": None,
+    },
+    "no_stops_half": {
+        "name": "No stops, half size (liquidation only)",
+        "initial_sl_pct": None,
+        "trail_tiers": [],
+        "amount_mult": 0.5,
+        "leverage_override": None,
+    },
+    "no_stops_low_lev": {
+        "name": "3x leverage, no stops",
+        "initial_sl_pct": None,
+        "trail_tiers": [],
+        "amount_mult": 1.0,
+        "leverage_override": 3,
+    },
+    "wide_sl_trail": {
+        "name": "15% SL + very wide trail (20/15/10/5%)",
+        "initial_sl_pct": 15.0,
+        "trail_tiers": [(0, 0), (30, 20.0), (100, 15.0), (300, 10.0)],
+        "amount_mult": 1.0,
+        "leverage_override": None,
+    },
+}
 
 # ──────────────────────────────────────────────
 # API client
@@ -353,25 +401,46 @@ def compute_momentum_score(signals):
 # Trailing stop simulation
 # ──────────────────────────────────────────────
 
-def get_trail_tier(profit_pct):
-    active = TRAILING_TIERS[0]
-    for min_p, trail in TRAILING_TIERS:
+def get_trail_tier(profit_pct, tiers):
+    """Return the active trail tier for current profit."""
+    if not tiers:
+        return (0, 0)
+    active = tiers[0]
+    for min_p, trail in tiers:
         if profit_pct >= min_p:
             active = (min_p, trail)
     return active
 
 
-def simulate_position(klines_from_entry, entry_price, leverage, initial_sl_pct, amount_usdt):
+def simulate_position(klines_from_entry, entry_price, leverage, initial_sl_pct,
+                      amount_usdt, trail_tiers=None):
     """
     Simulate a long position through historical candles.
-    Returns exit details.
+
+    If initial_sl_pct is None, no stop loss is set — position only exits via
+    liquidation (approx -(90/leverage)% price move) or end of data.
+
+    Returns (events, exit_price, profit_pct, pnl_usd, exit_type).
     """
-    sl_price = entry_price * (1 - initial_sl_pct / 100)
+    if trail_tiers is None:
+        trail_tiers = TRAILING_TIERS
+
+    # Set initial stop — None means no stop, use liquidation as floor
+    if initial_sl_pct is None:
+        # Liquidation ~ -(90/leverage)% to account for maintenance margin + fees
+        liq_pct = 90.0 / leverage
+        sl_price = entry_price * (1 - liq_pct / 100)
+        stop_type = "LIQUIDATION"
+    else:
+        sl_price = entry_price * (1 - initial_sl_pct / 100)
+        stop_type = "STOPPED OUT"
+
+    # Also enforce liquidation even when a stop is set (can't go below liq)
+    liq_price = entry_price * (1 - 90.0 / leverage / 100)
+
     trailing_active = False
-    trail_pct = 0
     highest_price = entry_price
     current_tier_pct = 0
-    position_size = amount_usdt * leverage / entry_price
 
     events = []
     events.append({
@@ -390,36 +459,50 @@ def simulate_position(klines_from_entry, entry_price, leverage, initial_sl_pct, 
         ts = int(k[0])
         candle_time = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
 
-        # Update highest price (for trailing stop calculation)
         if high > highest_price:
             highest_price = high
 
-        # Check if SL was hit (low goes below SL)
-        if low <= sl_price:
-            exit_price = sl_price  # assume stopped at SL price
+        # Check liquidation first (applies regardless of stop)
+        if low <= liq_price:
+            exit_price = liq_price
             profit_pct = (exit_price - entry_price) / entry_price * 100
             pnl_usd = amount_usdt * leverage * profit_pct / 100
             events.append({
                 "candle": i,
                 "time": candle_time.strftime("%Y-%m-%d %H:%M"),
-                "action": "STOPPED OUT",
+                "action": "LIQUIDATED",
+                "price": exit_price,
+                "profit_pct": round(profit_pct, 2),
+                "pnl_usd": round(pnl_usd, 2),
+            })
+            return events, exit_price, profit_pct, pnl_usd, "liquidated"
+
+        # Check if stop loss was hit (only if we have a real stop)
+        if initial_sl_pct is not None and low <= sl_price:
+            exit_price = sl_price
+            profit_pct = (exit_price - entry_price) / entry_price * 100
+            pnl_usd = amount_usdt * leverage * profit_pct / 100
+            events.append({
+                "candle": i,
+                "time": candle_time.strftime("%Y-%m-%d %H:%M"),
+                "action": stop_type,
                 "price": exit_price,
                 "profit_pct": round(profit_pct, 2),
                 "pnl_usd": round(pnl_usd, 2),
             })
             return events, exit_price, profit_pct, pnl_usd, "stopped_out"
 
-        # Calculate current profit
-        profit_pct = (close - entry_price) / entry_price * 100
+        # If no stops configured, skip trailing logic entirely
+        if initial_sl_pct is None:
+            continue
 
-        # Check trailing stop tiers
-        _, tier_trail = get_trail_tier(profit_pct)
+        profit_pct = (close - entry_price) / entry_price * 100
+        _, tier_trail = get_trail_tier(profit_pct, trail_tiers)
 
         if tier_trail > 0 and (tier_trail != current_tier_pct):
             if current_tier_pct == 0 or tier_trail < current_tier_pct:
                 current_tier_pct = tier_trail
                 trailing_active = True
-                # Update SL to trailing level
                 trail_distance = highest_price * tier_trail / 100
                 new_sl = highest_price - trail_distance
                 if new_sl > sl_price:
@@ -433,7 +516,6 @@ def simulate_position(klines_from_entry, entry_price, leverage, initial_sl_pct, 
                         "profit_pct": round(profit_pct, 2),
                     })
 
-        # Update trailing stop level based on highest price
         if trailing_active and current_tier_pct > 0:
             trail_distance = highest_price * current_tier_pct / 100
             new_sl = highest_price - trail_distance
@@ -459,25 +541,29 @@ def simulate_position(klines_from_entry, entry_price, leverage, initial_sl_pct, 
 # ──────────────────────────────────────────────
 
 def run_backtest(base_url, symbol, days, scan_interval_candles, min_score,
-                 amount_usdt, leverage, initial_sl_pct):
+                 amount_usdt, leverage, initial_sl_pct,
+                 trail_tiers=None, preloaded_data=None):
     """
     Run full backtest for a single symbol.
     scan_interval_candles: how many 1h candles between scans (1 = every hour)
+    preloaded_data: tuple of (klines_1h, oi_data) to avoid re-fetching
     """
-    print(f"\n{'='*80}")
-    print(f"  BACKTESTING: {symbol}")
-    print(f"{'='*80}")
+    # Use preloaded data if given (for --compare mode to avoid re-fetching)
+    if preloaded_data:
+        klines_1h, oi_data = preloaded_data
+    else:
+        print(f"\n{'='*80}")
+        print(f"  BACKTESTING: {symbol}")
+        print(f"{'='*80}")
+        print(f"\n  Fetching historical data ({days} days)...")
+        klines_1h = fetch_full_klines(base_url, symbol, "60", days)
+        if len(klines_1h) < 48:
+            print(f"  Not enough data for {symbol} ({len(klines_1h)} candles). Skipping.")
+            return None
 
-    # Fetch data
-    print(f"\n  Fetching historical data ({days} days)...")
-    klines_1h = fetch_full_klines(base_url, symbol, "60", days)
-    if len(klines_1h) < 48:
-        print(f"  Not enough data for {symbol} ({len(klines_1h)} candles). Skipping.")
-        return None
-
-    print(f"    Fetching OI history...", end=" ")
-    oi_data = fetch_oi_history(base_url, symbol, days)
-    print(f"got {len(oi_data)} data points")
+        print(f"    Fetching OI history...", end=" ")
+        oi_data = fetch_oi_history(base_url, symbol, days)
+        print(f"got {len(oi_data)} data points")
 
     # Price range
     all_closes = [float(k[4]) for k in klines_1h]
@@ -547,7 +633,8 @@ def run_backtest(base_url, symbol, days, scan_interval_candles, min_score,
                 continue
 
             events, exit_price, profit_pct, pnl_usd, exit_type = simulate_position(
-                remaining_klines, entry_price, leverage, initial_sl_pct, amount_usdt
+                remaining_klines, entry_price, leverage, initial_sl_pct, amount_usdt,
+                trail_tiers=trail_tiers,
             )
 
             trade = {
@@ -667,6 +754,138 @@ def display_backtest(result, amount_usdt, leverage, min_score):
     return total_pnl
 
 
+def run_strategy_comparison(base_url, symbols, days, scan_interval, min_score,
+                             base_amount, base_leverage):
+    """
+    Run the same set of symbols against all STRATEGIES and compare results.
+    Fetches data once per symbol, then simulates each strategy.
+    """
+    print(f"\n{'='*90}")
+    print(f"  STRATEGY COMPARISON — {len(symbols)} symbol(s), {days} days, score {min_score}+")
+    print(f"{'='*90}")
+    print(f"  Base position: ${base_amount} @ {base_leverage}x")
+    print(f"\n  Strategies being compared:")
+    for key, strat in STRATEGIES.items():
+        lev = strat["leverage_override"] or base_leverage
+        amt = base_amount * strat["amount_mult"]
+        sl_str = f"{strat['initial_sl_pct']}% SL" if strat["initial_sl_pct"] else "NO SL (liq only)"
+        print(f"    [{key}] {strat['name']} — ${amt:.0f} @ {lev}x, {sl_str}")
+    print()
+
+    # results[strategy_key][symbol] = total_pnl
+    strategy_results = {key: {"pnl": 0.0, "trades": 0, "wins": 0,
+                               "liquidations": 0, "still_open": 0, "per_symbol": {}}
+                        for key in STRATEGIES}
+
+    for symbol in symbols:
+        print(f"\n{'─'*90}")
+        print(f"  {symbol}")
+        print(f"{'─'*90}")
+
+        # Fetch data once
+        print(f"  Fetching data...", end=" ")
+        klines_1h = fetch_full_klines(base_url, symbol, "60", days)
+        if len(klines_1h) < 48:
+            print(f"insufficient ({len(klines_1h)} candles). Skipping.")
+            continue
+        print(f"got {len(klines_1h)} candles.", end=" ")
+        oi_data = fetch_oi_history(base_url, symbol, days)
+        print(f"OI: {len(oi_data)} points")
+
+        preloaded = (klines_1h, oi_data)
+
+        # Run each strategy using the same data
+        for key, strat in STRATEGIES.items():
+            leverage = strat["leverage_override"] or base_leverage
+            amount = base_amount * strat["amount_mult"]
+            sl = strat["initial_sl_pct"]
+            tiers = strat["trail_tiers"] if strat["trail_tiers"] else [(0, 0)]
+
+            result = run_backtest(
+                base_url, symbol, days, scan_interval, min_score,
+                amount, leverage, sl if sl is not None else 999,  # dummy sl for signal loop
+                trail_tiers=tiers, preloaded_data=preloaded,
+            )
+            # If initial_sl_pct was None, we need to re-run the trade simulation
+            # bypassing the normal stop. Do this by re-simulating trades.
+            if sl is None and result and result["trades"]:
+                for trade in result["trades"]:
+                    # Find entry in klines
+                    entry_time_str = trade["entry_time"]
+                    entry_idx = None
+                    for idx, k in enumerate(klines_1h):
+                        k_time = datetime.fromtimestamp(int(k[0]) / 1000, tz=timezone.utc)
+                        if k_time.strftime("%Y-%m-%d %H:%M") == entry_time_str:
+                            entry_idx = idx
+                            break
+                    if entry_idx is None:
+                        continue
+                    remaining = klines_1h[entry_idx + 1:]
+                    if len(remaining) < 2:
+                        continue
+                    events, exit_price, profit_pct, pnl_usd, exit_type = simulate_position(
+                        remaining, trade["entry_price"], leverage,
+                        None, amount, trail_tiers=[]
+                    )
+                    trade["exit_price"] = exit_price
+                    trade["profit_pct"] = round(profit_pct, 2)
+                    trade["leveraged_pct"] = round(profit_pct * leverage, 2)
+                    trade["pnl_usd"] = round(pnl_usd, 2)
+                    trade["exit_type"] = exit_type
+                    trade["events"] = events
+
+            if not result:
+                continue
+
+            # Aggregate
+            sym_pnl = sum(t["pnl_usd"] for t in result["trades"])
+            strategy_results[key]["pnl"] += sym_pnl
+            strategy_results[key]["trades"] += len(result["trades"])
+            strategy_results[key]["wins"] += sum(1 for t in result["trades"] if t["pnl_usd"] > 0)
+            strategy_results[key]["liquidations"] += sum(1 for t in result["trades"] if t["exit_type"] == "liquidated")
+            strategy_results[key]["still_open"] += sum(1 for t in result["trades"] if t["exit_type"] == "still_open")
+            strategy_results[key]["per_symbol"][symbol] = {
+                "pnl": sym_pnl,
+                "trades": len(result["trades"]),
+                "best": max((t["pnl_usd"] for t in result["trades"]), default=0),
+                "worst": min((t["pnl_usd"] for t in result["trades"]), default=0),
+            }
+
+        # Print per-symbol row
+        print(f"\n  Per-strategy P&L for {symbol}:")
+        for key, strat in STRATEGIES.items():
+            sym_data = strategy_results[key]["per_symbol"].get(symbol)
+            if sym_data and sym_data["trades"] > 0:
+                print(f"    [{key:20}] {sym_data['trades']} trades | "
+                      f"P&L: ${sym_data['pnl']:+,.2f} | "
+                      f"Best: ${sym_data['best']:+,.2f} | Worst: ${sym_data['worst']:+,.2f}")
+            else:
+                print(f"    [{key:20}] No trades triggered")
+
+    # Final comparison table
+    print(f"\n\n{'='*90}")
+    print(f"  STRATEGY COMPARISON — FINAL RESULTS")
+    print(f"{'='*90}")
+    print(f"  {'Strategy':<35} {'Trades':>7} {'Wins':>6} {'Liq':>5} {'Open':>5} {'Total P&L':>14}")
+    print(f"  {'-'*90}")
+
+    ranked = sorted(strategy_results.items(), key=lambda x: x[1]["pnl"], reverse=True)
+    for key, data in ranked:
+        name = STRATEGIES[key]["name"]
+        if len(name) > 34:
+            name = name[:31] + "..."
+        wr = f"{data['wins']}/{data['trades']}" if data["trades"] > 0 else "0/0"
+        print(f"  {name:<35} {data['trades']:>7} {wr:>6} "
+              f"{data['liquidations']:>5} {data['still_open']:>5} "
+              f"${data['pnl']:>+12,.2f}")
+
+    print(f"  {'-'*90}")
+    winner = ranked[0]
+    print(f"\n  WINNER: [{winner[0]}] {STRATEGIES[winner[0]]['name']}")
+    print(f"           Total P&L: ${winner[1]['pnl']:+,.2f}")
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Backtest the momentum scanner + position manager on historical data"
@@ -687,6 +906,8 @@ def main():
                         help="Scan interval in hours (default: 1 = every candle)")
     parser.add_argument("--testnet", action="store_true", help="Use testnet")
     parser.add_argument("--save", action="store_true", help="Save results to JSON")
+    parser.add_argument("--compare", action="store_true",
+                        help="Compare multiple strategies side-by-side on the same symbols")
     args = parser.parse_args()
 
     base_url = TESTNET_URL if args.testnet else MAINNET_URL
@@ -704,7 +925,7 @@ def main():
         print(f"  Trigger:        score {args.min_score}+")
         print(f"  Position:       ${args.amount} @ {args.leverage}x leverage")
         print(f"  Initial SL:     {args.initial_sl}%")
-        print(f"  Trailing tiers: 10%→5% trail, 30%→3%, 100%→2%, 300%→1.5%")
+        print(f"  Trailing tiers: 10%→8% trail, 30%→6%, 100%→3%, 300%→2%")
         print(f"  Scan interval:  every {args.scan_interval}h")
 
     def run_for_symbols(symbols):
@@ -738,6 +959,25 @@ def main():
             print(f"  Combined ROI:   {grand_total_pnl / (args.amount * symbols_tested) * 100:+.1f}% "
                   f"on ${args.amount * symbols_tested:,.0f} total capital")
         print()
+
+    # Compare mode: run all strategies side-by-side
+    if args.compare:
+        if not args.symbols:
+            print("\n  --compare requires --symbols. Example:")
+            print("    python3 backtest.py --compare --symbols RAVE INX TRU BLESS ENJ\n")
+            return
+        # Auto-append USDT if missing
+        symbols = []
+        for s in args.symbols:
+            s = s.upper()
+            if not s.endswith("USDT") and not s.endswith("USD"):
+                s = s + "USDT"
+            symbols.append(s)
+        run_strategy_comparison(
+            base_url, symbols, args.days, args.scan_interval,
+            args.min_score, args.amount, args.leverage,
+        )
+        return
 
     # If symbols passed via CLI, run them and done
     if args.symbols:
