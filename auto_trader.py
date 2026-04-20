@@ -628,6 +628,12 @@ def run_auto_trader(args):
                 print(f"  >> {symbol} | Score: {score} | Price: ${price:,.6g} | 24h: {r['change24h']:+.1f}% | Vol: ${turnover/1e6:,.1f}M")
                 print(f"     Vol: {signals['volume_anomaly']['detail']}")
                 print(f"     OI:  {signals['oi_surge']['detail']}")
+                sqz = signals.get("squeeze_setup", {})
+                dist = signals.get("distribution_risk", {})
+                if sqz.get("score", 0) > 0:
+                    print(f"     Squeeze setup: {sqz['detail']} (score {sqz['score']})")
+                if dist.get("penalty", 0) > 0:
+                    print(f"     Dist penalty:  -{dist['penalty']} pts | {dist['detail']}")
 
                 # Volume filter: skip coins with < $20M 24h volume
                 if turnover < MIN_VOLUME_24H:
