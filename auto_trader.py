@@ -21,11 +21,12 @@ REQUIRES:
   export BYBIT_API_SECRET="your_secret"
 
 Usage:
-    python3 auto_trader.py                        # dry-run, scan every 15 min
-    python3 auto_trader.py --live                 # REAL TRADES on mainnet
-    python3 auto_trader.py --live --amount 250    # $250 per trade instead of $500
-    python3 auto_trader.py --min-score 70         # trigger on score 70+
-    python3 auto_trader.py --live --initial-sl 8  # 8% initial stop loss
+    python3 auto_trader.py                              # dry-run, scan every 15 min
+    python3 auto_trader.py --live                       # REAL TRADES on mainnet
+    python3 auto_trader.py --live --amount 250          # $250 per trade instead of $500
+    python3 auto_trader.py --min-score 70               # trigger on score 70+
+    python3 auto_trader.py --live --initial-sl 8        # 8% initial stop loss
+    python3 auto_trader.py --no-stops --amount 250      # zero-hero: no SL, half size (best backtest)
 """
 
 from __future__ import annotations
@@ -433,14 +434,15 @@ def manage_positions(base_url, api_key, api_secret, initial_sl_pct, is_live, pos
         new_sl = None
         new_trail = None
 
-        # Set initial SL
+        # Set initial SL (skipped in zero-hero mode where initial_sl_pct == 0)
         if not ps["initial_sl_set"] and current_sl == 0:
-            if side == "Buy":
-                new_sl = round(entry_price * (1 - initial_sl_pct / 100), 6)
-            else:
-                new_sl = round(entry_price * (1 + initial_sl_pct / 100), 6)
-            action = f"SET initial SL at ${new_sl:,.6g} (-{initial_sl_pct}%)"
-            ps["initial_sl_set"] = True
+            if initial_sl_pct > 0:
+                if side == "Buy":
+                    new_sl = round(entry_price * (1 - initial_sl_pct / 100), 6)
+                else:
+                    new_sl = round(entry_price * (1 + initial_sl_pct / 100), 6)
+                action = f"SET initial SL at ${new_sl:,.6g} (-{initial_sl_pct}%)"
+            ps["initial_sl_set"] = True  # mark set regardless, so we don't re-check every cycle
 
         # Upgrade trailing stop
         elif tier_trail_pct > 0 and tier_trail_pct != ps.get("current_tier_pct", 0):
@@ -547,6 +549,10 @@ def run_auto_trader(args):
     env_label = "TESTNET" if args.testnet else "MAINNET"
     mode = "LIVE" if args.live else "DRY-RUN"
 
+    # --no-stops overrides --initial-sl (zero-hero mode)
+    if args.no_stops:
+        args.initial_sl = 0.0
+
     api_key, api_secret = get_credentials()
 
     session = TradingSession(
@@ -570,7 +576,10 @@ def run_auto_trader(args):
     print(f"  Max per cycle:   {MAX_TRADES_PER_CYCLE} trades")
     print(f"  Max per day:     {MAX_TRADES_PER_DAY} trades")
     print(f"  Max exposure:    ${MAX_TOTAL_EXPOSURE_USDT:,}")
-    print(f"  Initial SL:      {args.initial_sl}% (set with order)")
+    if args.no_stops:
+        print(f"  Initial SL:      NONE — zero-hero mode (trailing stops only, activate at 10%+ profit)")
+    else:
+        print(f"  Initial SL:      {args.initial_sl}% (set with order)")
     print(f"  Min 24h volume:  ${MIN_VOLUME_24H/1e6:.0f}M (filters micro-caps)")
     print(f"  Re-entry after:  {RE_ENTRY_COOLDOWN_HOURS}h cooldown (ARIA-style round 2)")
     print(f"  Trailing tiers:  10%→8% | 30%→6% | 100%→3% | 300%→2%")
@@ -660,25 +669,31 @@ def run_auto_trader(args):
                 est_value = float(qty) * price
                 print(f"     Order: BUY {qty} {symbol} (~${est_value:,.2f}) @ {args.leverage}x leverage")
 
-                # Calculate stop loss price (set atomically with the order)
-                sl_price = round(price * (1 - args.initial_sl / 100), 6)
+                # Stop loss — omitted in zero-hero mode
+                sl_price = None if args.no_stops else round(price * (1 - args.initial_sl / 100), 6)
 
                 if not args.live:
                     # Dry run
-                    print(f"     [DRY-RUN] Would place order with SL at ${sl_price:,.6g} (-{args.initial_sl}%)")
+                    if sl_price:
+                        print(f"     [DRY-RUN] Would place order with SL at ${sl_price:,.6g} (-{args.initial_sl}%)")
+                    else:
+                        print(f"     [DRY-RUN] Would place order NO SL (zero-hero — trailing stops only)")
                     log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                               score, signals, "dry-run", "N/A", "dry-run")
                     session.record_trade(symbol, est_value)
                     trades_this_cycle += 1
                 else:
-                    # LIVE: set leverage then place order with stop loss
+                    # LIVE: set leverage then place order
                     print(f"     Setting leverage to {args.leverage}x...", end=" ")
                     lev_ok = set_leverage(base_url, api_key, api_secret, symbol, args.leverage)
                     print("OK" if lev_ok else "WARN (may already be set)")
 
                     time.sleep(0.3)  # rate limit between POST calls
 
-                    print(f"     Placing market order with SL at ${sl_price:,.6g} (-{args.initial_sl}%)...", end=" ")
+                    if sl_price:
+                        print(f"     Placing market order with SL at ${sl_price:,.6g} (-{args.initial_sl}%)...", end=" ")
+                    else:
+                        print(f"     Placing market order NO SL (zero-hero)...", end=" ")
                     result = place_market_order(base_url, api_key, api_secret, symbol, qty,
                                                 stop_loss=sl_price)
                     ret_code = result.get("retCode", -1)
@@ -705,8 +720,9 @@ def run_auto_trader(args):
                             "category": "linear", "symbol": symbol,
                             "side": "Buy", "orderType": "Market", "qty": qty,
                             "orderLinkId": order_link_id, "positionIdx": 1,
-                            "stopLoss": str(sl_price),
                         }
+                        if sl_price:
+                            hedge_params["stopLoss"] = str(sl_price)
                         result2 = api_request(base_url, "POST", "/v5/order/create",
                                               api_key, api_secret, hedge_params)
                         if result2.get("retCode") == 0:
@@ -783,6 +799,8 @@ def main():
                         help=f"Scan interval in minutes (default: {DEFAULT_INTERVAL_MIN})")
     parser.add_argument("--initial-sl", type=float, default=DEFAULT_INITIAL_SL_PCT,
                         help=f"Initial stop loss %% (default: {DEFAULT_INITIAL_SL_PCT})")
+    parser.add_argument("--no-stops", action="store_true",
+                        help="Zero-hero mode: no initial SL, trailing stops only. Pair with --amount 250 (half size).")
     args = parser.parse_args()
 
     if args.live and not args.testnet:
