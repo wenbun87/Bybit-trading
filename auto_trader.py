@@ -1,32 +1,36 @@
 #!/usr/bin/env python3
 """
-Bybit Momentum Auto-Trader + Position Manager (all-in-one)
+Bybit Momentum Auto-Trader
 
-Runs the momentum scanner on a schedule, opens positions on high-scoring
-coins, AND manages exits with adaptive trailing stops — all in one script.
+Runs the momentum scanner on a schedule, opens long positions on high-scoring
+coins with no stop loss (ride-or-die strategy based on backtest results).
 
-  Entry:  Momentum score 60+ → market buy $500 perp
-  Exit:   -8% initial SL → trailing stops tighten as profit grows
-          10%+ → 8% trail | 30%+ → 6% | 100%+ → 3% | 300%+ → 2%
+  Entry:  Momentum score 60+ → market buy perp (no stops)
+  Exit:   Manual — close when you want
+
+DRY-RUN MODE (default):
+  Paper trades tracked with live P&L updates every scan cycle.
+  Full P&L summary on Ctrl+C.
+
+LIVE MODE:
+  Real orders placed. Open position P&L shown every scan cycle.
 
 SAFETY FEATURES:
   - Starts in DRY-RUN mode by default (no real trades until you pass --live)
   - Max trades per cycle and per day
-  - Won't re-enter a coin already traded in this session
+  - 6h re-entry cooldown per symbol
   - Max total exposure cap
-  - All trades + exit events logged to CSV
+  - All trades logged to CSV
 
 REQUIRES:
   export BYBIT_API_KEY="your_key"
   export BYBIT_API_SECRET="your_secret"
 
 Usage:
-    python3 auto_trader.py                              # dry-run, scan every 15 min
-    python3 auto_trader.py --live                       # REAL TRADES on mainnet
-    python3 auto_trader.py --live --amount 250          # $250 per trade instead of $500
-    python3 auto_trader.py --min-score 70               # trigger on score 70+
-    python3 auto_trader.py --live --initial-sl 8        # 8% initial stop loss
-    python3 auto_trader.py --no-stops --amount 250      # zero-hero: no SL, half size (best backtest)
+    python3 auto_trader.py                    # dry-run with paper P&L tracking
+    python3 auto_trader.py --live             # REAL TRADES on mainnet (no stops)
+    python3 auto_trader.py --live --amount 250  # $250 per trade
+    python3 auto_trader.py --min-score 70     # trigger on score 70+
 """
 
 from __future__ import annotations
@@ -45,7 +49,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Import the scanner
-from momentum_scanner import run_scan, MAINNET_URL, TESTNET_URL
+from momentum_scanner import run_scan, fetch_all_linear_tickers, MAINNET_URL, TESTNET_URL
 
 # ──────────────────────────────────────────────
 # Config
@@ -63,22 +67,9 @@ MAX_TRADES_PER_DAY = 6          # max trades in 24 hours
 MAX_TOTAL_EXPOSURE_USDT = 3000  # stop opening if total exceeds this
 DEFAULT_LEVERAGE = 10           # 10x leverage
 MIN_VOLUME_24H = 5_000_000      # only trade coins with >$5M 24h volume
-RE_ENTRY_COOLDOWN_HOURS = 6     # allow re-entry on same symbol after this cooldown (ARIA-style round 2)
+RE_ENTRY_COOLDOWN_HOURS = 6     # allow re-entry on same symbol after this cooldown
 
 TRADE_LOG_FILE = "trade_log.csv"
-EXIT_LOG_FILE = "exit_log.csv"
-STATE_FILE = "position_state.json"
-
-# Trailing stop tiers: (min_profit_pct, trailing_stop_pct)
-TRAILING_TIERS = [
-    (0,    0),     # below 10%: no trailing stop, just initial SL
-    (10,   8.0),   # 10%+ profit: trail at 8% distance
-    (30,   6.0),   # 30%+ profit: tighten to 6%
-    (100,  3.0),   # 100%+ profit: tighten to 3%
-    (300,  2.0),   # 300%+ profit: tight 2%
-]
-
-DEFAULT_INITIAL_SL_PCT = 8.0
 
 # ──────────────────────────────────────────────
 # Authenticated API client
@@ -283,107 +274,162 @@ def log_trade(symbol: str, side: str, qty: str, price: float,
 
 
 # ──────────────────────────────────────────────
-# Position management (trailing stops)
+# Paper trading (non-live P&L tracking)
 # ──────────────────────────────────────────────
 
-def set_trading_stop(base_url, api_key, api_secret, symbol, position_idx,
-                     stop_loss=None, trailing_stop=None):
-    params = {
-        "category": "linear",
-        "symbol": symbol,
-        "positionIdx": position_idx,
-    }
-    if stop_loss is not None:
-        params["stopLoss"] = str(stop_loss)
-    if trailing_stop is not None:
-        params["trailingStop"] = str(trailing_stop)
-    return api_request(base_url, "POST", "/v5/position/trading-stop",
-                       api_key, api_secret, params)
+class MomentumPaperTrader:
+    """Tracks hypothetical momentum trades during dry-run / scan-only mode."""
+
+    def __init__(self, amount_usdt, leverage):
+        self.amount = amount_usdt
+        self.leverage = leverage
+        self.positions = {}       # symbol -> position dict
+        self.closed_trades = []   # completed trades
+        self.start_time = time.time()
+
+    def enter(self, symbol, price, score, signals):
+        if symbol in self.positions:
+            return
+        qty = (self.amount * self.leverage) / price
+        self.positions[symbol] = {
+            "entry_price": price,
+            "qty": qty,
+            "entry_time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+            "score": score,
+        }
+        print(f"  [PAPER] LONG {symbol} @ {price:,.6g} | "
+              f"Score {score:.0f} | ${self.amount} x{self.leverage}")
+
+    def update_prices(self, base_url):
+        """Fetch latest prices for all open paper positions."""
+        if not self.positions:
+            return
+        tickers = fetch_all_linear_tickers(base_url)
+        price_map = {}
+        for t in tickers:
+            try:
+                price_map[t["symbol"]] = float(t["lastPrice"])
+            except (KeyError, ValueError, TypeError):
+                continue
+        for symbol, pos in self.positions.items():
+            price = price_map.get(symbol)
+            if price:
+                pos["current_price"] = price
+
+    def display_positions(self):
+        if not self.positions:
+            return
+        print(f"\n  {'─'*90}")
+        print(f"  PAPER POSITIONS ({len(self.positions)} open)")
+        print(f"  {'─'*90}")
+        print(f"  {'Symbol':<14} {'Score':>6} {'Entry':>12} {'Current':>12}"
+              f"  {'P&L%':>8}  {'P&L$':>10}")
+        print(f"  {'─'*90}")
+
+        total_pnl = 0
+        for symbol, pos in sorted(self.positions.items()):
+            price = pos.get("current_price", pos["entry_price"])
+            entry = pos["entry_price"]
+            pnl_pct = (price - entry) / entry * 100
+            pnl_usd = pnl_pct / 100 * self.amount * self.leverage
+            total_pnl += pnl_usd
+
+            print(f"  {symbol:<14} {pos['score']:>6.0f} {entry:>12,.6g} {price:>12,.6g}"
+                  f"  {pnl_pct:>+7.1f}%  ${pnl_usd:>+9,.2f}")
+
+        print(f"  {'─'*90}")
+        print(f"  {'Total unrealized P&L:':>60}  ${total_pnl:>+9,.2f}")
+        print()
+
+    def display_periodic_summary(self):
+        unrealized = 0
+        for pos in self.positions.values():
+            price = pos.get("current_price", pos["entry_price"])
+            pnl_pct = (price - pos["entry_price"]) / pos["entry_price"] * 100
+            unrealized += pnl_pct / 100 * self.amount * self.leverage
+
+        elapsed = time.time() - self.start_time
+        mins = int(elapsed / 60)
+
+        print(f"\n  {'='*80}")
+        print(f"  PAPER P&L UPDATE ({mins}m elapsed)")
+        print(f"  {'─'*80}")
+        print(f"    Open:      {len(self.positions)} position(s) | Unrealized: ${unrealized:+,.2f}")
+        print(f"  {'='*80}")
+
+    def display_summary(self):
+        elapsed = time.time() - self.start_time
+        hours = elapsed / 3600
+        mins = (elapsed % 3600) / 60
+
+        print(f"\n{'='*90}")
+        print(f"  PAPER TRADING SUMMARY")
+        print(f"  Session: {int(hours)}h {int(mins)}m | "
+              f"${self.amount} per trade @ {self.leverage}x leverage | No stops")
+        print(f"{'='*90}")
+
+        if not self.positions:
+            print(f"\n  No paper trades were opened during this session.")
+            print(f"{'='*90}\n")
+            return
+
+        print(f"\n  ALL POSITIONS ({len(self.positions)}):")
+        print(f"  {'─'*85}")
+        print(f"  {'Symbol':<14} {'Score':>6} {'Entry':>12} {'Current':>12}"
+              f"  {'P&L%':>8}  {'P&L$':>10}  {'Entered'}")
+        print(f"  {'─'*85}")
+
+        total_pnl = 0
+        wins = 0
+        losses = 0
+        for symbol, pos in sorted(self.positions.items(), key=lambda x: x[1].get("current_price", x[1]["entry_price"]) / x[1]["entry_price"] - 1, reverse=True):
+            price = pos.get("current_price", pos["entry_price"])
+            entry = pos["entry_price"]
+            pnl_pct = (price - entry) / entry * 100
+            pnl_usd = pnl_pct / 100 * self.amount * self.leverage
+            total_pnl += pnl_usd
+            if pnl_usd >= 0:
+                wins += 1
+            else:
+                losses += 1
+
+            print(f"  {symbol:<14} {pos['score']:>6.0f} {entry:>12,.6g} {price:>12,.6g}"
+                  f"  {pnl_pct:>+7.1f}%  ${pnl_usd:>+9,.2f}  {pos['entry_time']}")
+
+        print(f"  {'─'*85}")
+        total_trades = len(self.positions)
+        print(f"\n  RESULTS:")
+        print(f"    Total trades:  {total_trades}")
+        print(f"    Winning:       {wins} ({wins/total_trades*100:.0f}%)")
+        print(f"    Losing:        {losses} ({losses/total_trades*100:.0f}%)")
+        print(f"\n    TOTAL P&L:     ${total_pnl:+,.2f}")
+        print(f"{'='*90}\n")
 
 
-def get_current_tier(profit_pct):
-    active = TRAILING_TIERS[0]
-    for min_profit, trail_pct in TRAILING_TIERS:
-        if profit_pct >= min_profit:
-            active = (min_profit, trail_pct)
-    return active
+# ──────────────────────────────────────────────
+# Live P&L display
+# ──────────────────────────────────────────────
 
-
-def init_exit_log():
-    if not Path(EXIT_LOG_FILE).exists():
-        with open(EXIT_LOG_FILE, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "timestamp", "symbol", "side", "entry_price", "exit_trigger",
-                "profit_pct", "trailing_tier", "action",
-            ])
-
-
-def log_exit_event(symbol, side, entry_price, trigger, profit_pct, tier, action):
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    with open(EXIT_LOG_FILE, "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([now, symbol, side, entry_price, trigger, profit_pct, tier, action])
-
-
-def load_position_state():
-    if Path(STATE_FILE).exists():
-        with open(STATE_FILE) as f:
-            return json.load(f)
-    return {}
-
-
-def save_position_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
-
-
-def fetch_ticker_volumes(base_url: str, symbols: list[str]) -> dict[str, float]:
-    """Fetch 24h turnover for a list of symbols (single API call)."""
-    url = f"{base_url}/v5/market/tickers?category=linear"
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            tickers = data.get("result", {}).get("list", [])
-            wanted = set(symbols)
-            return {
-                t["symbol"]: float(t.get("turnover24h", 0))
-                for t in tickers if t.get("symbol") in wanted
-            }
-    except Exception:
-        return {}
-
-
-def manage_positions(base_url, api_key, api_secret, initial_sl_pct, is_live, pos_state):
-    """Check all open positions and manage trailing stops. Returns updated state."""
+def display_live_pnl(base_url, api_key, api_secret):
+    """Show real position P&L summary for live mode."""
     positions = get_open_positions(base_url, api_key, api_secret)
-
     if not positions:
-        if pos_state:
-            pos_state = {}
-            save_position_state(pos_state)
-        return pos_state
+        print(f"\n  No open positions.")
+        return
 
-    # Fetch 24h volumes for all open position symbols
-    pos_symbols = [p.get("symbol", "") for p in positions if float(p.get("size", "0") or "0") > 0]
-    volumes = fetch_ticker_volumes(base_url, pos_symbols)
-
-    total_unrealised = 0.0
+    total_pnl = 0.0
     print(f"\n  {'='*90}")
-    print(f"  OPEN POSITIONS — {len(positions)} active")
-    print(f"  {'='*90}")
-    active_symbols = set()
+    print(f"  LIVE POSITIONS — {len(positions)} open")
+    print(f"  {'─'*90}")
+    print(f"  {'Symbol':<14} {'Side':<6} {'Lev':>4} {'Entry':>12} {'Mark':>12}"
+          f"  {'P&L%':>8}  {'P&L$':>10}  {'Value':>10}")
+    print(f"  {'─'*90}")
 
     for pos in positions:
         symbol = pos.get("symbol", "")
         side = pos.get("side", "")
-        size = float(pos.get("size", "0") or "0")
         entry_price = float(pos.get("avgPrice", "0") or "0")
         mark_price = float(pos.get("markPrice", "0") or "0")
-        position_idx = int(pos.get("positionIdx", "0") or "0")
-        current_sl = float(pos.get("stopLoss", "0") or "0")
-        current_trail = float(pos.get("trailingStop", "0") or "0")
         leverage = pos.get("leverage", "?")
         unrealised_pnl = float(pos.get("unrealisedPnl", "0") or "0")
         position_value = float(pos.get("positionValue", "0") or "0")
@@ -391,111 +437,18 @@ def manage_positions(base_url, api_key, api_secret, initial_sl_pct, is_live, pos
         if entry_price <= 0 or mark_price <= 0:
             continue
 
-        active_symbols.add(symbol)
-        total_unrealised += unrealised_pnl
-
+        total_pnl += unrealised_pnl
         if side == "Buy":
             profit_pct = (mark_price - entry_price) / entry_price * 100
         else:
             profit_pct = (entry_price - mark_price) / entry_price * 100
 
-        lev = float(leverage) if leverage != "?" else 1
-        _, tier_trail_pct = get_current_tier(profit_pct)
-        state_key = f"{symbol}_{side}"
+        print(f"  {symbol:<14} {side:<6} {leverage:>4}x {entry_price:>12,.6g} {mark_price:>12,.6g}"
+              f"  {profit_pct:>+7.1f}%  ${unrealised_pnl:>+9,.2f}  ${position_value:>9,.2f}")
 
-        # SL distance from current price
-        if current_sl > 0:
-            if side == "Buy":
-                sl_dist_pct = (mark_price - current_sl) / mark_price * 100
-            else:
-                sl_dist_pct = (current_sl - mark_price) / mark_price * 100
-            sl_str = f"${current_sl:,.6g} ({sl_dist_pct:.1f}% away)"
-        else:
-            sl_str = "NONE ⚠"
-
-        trail_str = f"${current_trail:,.6g}" if current_trail > 0 else "OFF"
-        tier_str = f"{tier_trail_pct}%" if tier_trail_pct > 0 else "SL only"
-        pnl_color = "+" if unrealised_pnl >= 0 else ""
-        vol_24h = volumes.get(symbol, 0)
-        vol_str = f"${vol_24h/1e6:,.1f}M" if vol_24h >= 1e6 else f"${vol_24h:,.0f}"
-
-        print(f"\n  {symbol} {side} {lev:.0f}x  |  24h Vol: {vol_str}")
-        print(f"    Entry: ${entry_price:,.6g}  →  Now: ${mark_price:,.6g}  |  Size: {size} (~${position_value:,.2f})")
-        print(f"    P&L:   {pnl_color}${unrealised_pnl:,.2f} USDT  ({profit_pct:+.2f}% / {profit_pct*lev:+.1f}% with leverage)")
-        print(f"    SL:    {sl_str}  |  Trail: {trail_str}  |  Tier: {tier_str}")
-
-        ps = pos_state.get(state_key, {
-            "initial_sl_set": False, "current_tier_pct": 0, "highest_profit": 0,
-        })
-        if profit_pct > ps.get("highest_profit", 0):
-            ps["highest_profit"] = profit_pct
-
-        action = None
-        new_sl = None
-        new_trail = None
-
-        # Set initial SL (skipped in zero-hero mode where initial_sl_pct == 0)
-        if not ps["initial_sl_set"] and current_sl == 0:
-            if initial_sl_pct > 0:
-                if side == "Buy":
-                    new_sl = round(entry_price * (1 - initial_sl_pct / 100), 6)
-                else:
-                    new_sl = round(entry_price * (1 + initial_sl_pct / 100), 6)
-                action = f"SET initial SL at ${new_sl:,.6g} (-{initial_sl_pct}%)"
-            ps["initial_sl_set"] = True  # mark set regardless, so we don't re-check every cycle
-
-        # Upgrade trailing stop
-        elif tier_trail_pct > 0 and tier_trail_pct != ps.get("current_tier_pct", 0):
-            if tier_trail_pct < ps.get("current_tier_pct", 999) or ps.get("current_tier_pct", 0) == 0:
-                new_trail = round(mark_price * tier_trail_pct / 100, 6)
-                label = "ACTIVATE" if ps.get("current_tier_pct", 0) == 0 else "TIGHTEN"
-                action = f"{label} trail to {tier_trail_pct}% (${new_trail:,.6g} distance)"
-                ps["current_tier_pct"] = tier_trail_pct
-
-        if action:
-            print(f"    >> {action}")
-            if is_live:
-                result = set_trading_stop(base_url, api_key, api_secret, symbol,
-                                          position_idx, stop_loss=new_sl, trailing_stop=new_trail)
-                ret = result.get("retCode", -1)
-                if ret == 0:
-                    print(f"    >> APPLIED")
-                    log_exit_event(symbol, side, entry_price, "tier_update",
-                                   profit_pct, tier_trail_pct, action)
-                elif ret == 10001 and "position idx" in result.get("retMsg", "").lower():
-                    alt_idx = 1 if side == "Buy" else 2
-                    time.sleep(0.3)
-                    result2 = set_trading_stop(base_url, api_key, api_secret, symbol,
-                                               alt_idx, stop_loss=new_sl, trailing_stop=new_trail)
-                    if result2.get("retCode") == 0:
-                        print(f"    >> APPLIED (hedge mode)")
-                    else:
-                        print(f"    >> FAILED: {result2.get('retMsg')}")
-                else:
-                    print(f"    >> FAILED: {result.get('retMsg')}")
-            else:
-                print(f"    >> [DRY-RUN] Would apply")
-                log_exit_event(symbol, side, entry_price, "dry_run",
-                               profit_pct, tier_trail_pct, action)
-        else:
-            print(f"    >> OK")
-
-        pos_state[state_key] = ps
-
-    # Total P&L summary
-    pnl_sign = "+" if total_unrealised >= 0 else ""
-    print(f"\n  {'─'*50}")
-    print(f"  TOTAL UNREALISED P&L:  {pnl_sign}${total_unrealised:,.2f} USDT")
-    print(f"  {'─'*50}")
-
-    # Clean up closed positions
-    closed = [k for k in list(pos_state.keys()) if k.split("_")[0] not in active_symbols]
-    for k in closed:
-        print(f"  Position closed: {k}")
-        del pos_state[k]
-
-    save_position_state(pos_state)
-    return pos_state
+    print(f"  {'─'*90}")
+    print(f"  {'TOTAL P&L:':>60}  ${total_pnl:>+9,.2f}")
+    print(f"  {'='*90}")
 
 
 # ──────────────────────────────────────────────
@@ -549,10 +502,6 @@ def run_auto_trader(args):
     env_label = "TESTNET" if args.testnet else "MAINNET"
     mode = "LIVE" if args.live else "DRY-RUN"
 
-    # --no-stops overrides --initial-sl (zero-hero mode)
-    if args.no_stops:
-        args.initial_sl = 0.0
-
     api_key, api_secret = get_credentials()
 
     session = TradingSession(
@@ -562,35 +511,31 @@ def run_auto_trader(args):
     )
 
     init_trade_log()
-    init_exit_log()
-    pos_state = load_position_state()
+
+    paper = None if args.live else MomentumPaperTrader(args.amount, args.leverage)
 
     # Display config
     print(f"\n{'='*70}")
-    print(f"  MOMENTUM AUTO-TRADER + POSITION MANAGER [{env_label}] [{mode}]")
+    print(f"  MOMENTUM AUTO-TRADER [{env_label}] [{mode}]")
     print(f"{'='*70}")
     print(f"  Trade amount:    ${args.amount} USDT per trade")
     print(f"  Leverage:        {args.leverage}x")
+    print(f"  Strategy:        No stops (ride or die)")
     print(f"  Min score:       {args.min_score} (trigger threshold)")
     print(f"  Scan interval:   every {args.interval} minutes")
     print(f"  Max per cycle:   {MAX_TRADES_PER_CYCLE} trades")
     print(f"  Max per day:     {MAX_TRADES_PER_DAY} trades")
     print(f"  Max exposure:    ${MAX_TOTAL_EXPOSURE_USDT:,}")
-    if args.no_stops:
-        print(f"  Initial SL:      NONE — zero-hero mode (trailing stops only, activate at 10%+ profit)")
-    else:
-        print(f"  Initial SL:      {args.initial_sl}% (set with order)")
     print(f"  Min 24h volume:  ${MIN_VOLUME_24H/1e6:.0f}M (filters micro-caps)")
-    print(f"  Re-entry after:  {RE_ENTRY_COOLDOWN_HOURS}h cooldown (ARIA-style round 2)")
-    print(f"  Trailing tiers:  10%→8% | 30%→6% | 100%→3% | 300%→2%")
+    print(f"  Re-entry after:  {RE_ENTRY_COOLDOWN_HOURS}h cooldown")
     print(f"  Trade log:       {TRADE_LOG_FILE}")
-    print(f"  Exit log:        {EXIT_LOG_FILE}")
 
     if not args.live:
-        print(f"\n  >>> DRY-RUN MODE — no real orders will be placed <<<")
+        print(f"\n  >>> DRY-RUN MODE — paper trades tracked with P&L <<<")
         print(f"  >>> Add --live flag to enable real trading <<<")
+        print(f"  >>> P&L summary shown after each scan. Ctrl+C for final summary <<<")
     else:
-        print(f"\n  >>> LIVE MODE — REAL ORDERS WILL BE PLACED <<<")
+        print(f"\n  >>> LIVE MODE — REAL ORDERS WILL BE PLACED (no stops) <<<")
         print(f"  >>> Trading ${args.amount} per signal on {env_label} <<<")
 
     # Verify connection
@@ -667,35 +612,26 @@ def run_auto_trader(args):
                     continue
 
                 est_value = float(qty) * price
-                print(f"     Order: BUY {qty} {symbol} (~${est_value:,.2f}) @ {args.leverage}x leverage")
-
-                # Stop loss — omitted in zero-hero mode
-                sl_price = None if args.no_stops else round(price * (1 - args.initial_sl / 100), 6)
+                print(f"     Order: BUY {qty} {symbol} (~${est_value:,.2f}) @ {args.leverage}x leverage (no stops)")
 
                 if not args.live:
-                    # Dry run
-                    if sl_price:
-                        print(f"     [DRY-RUN] Would place order with SL at ${sl_price:,.6g} (-{args.initial_sl}%)")
-                    else:
-                        print(f"     [DRY-RUN] Would place order NO SL (zero-hero — trailing stops only)")
+                    # Dry run — track as paper trade
+                    print(f"     [DRY-RUN] Would place order (no stops)")
                     log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                               score, signals, "dry-run", "N/A", "dry-run")
+                    if paper:
+                        paper.enter(symbol, price, score, signals)
                     session.record_trade(symbol, est_value)
                     trades_this_cycle += 1
                 else:
-                    # LIVE: set leverage then place order
+                    # LIVE: set leverage then place order (no stop loss)
                     print(f"     Setting leverage to {args.leverage}x...", end=" ")
                     lev_ok = set_leverage(base_url, api_key, api_secret, symbol, args.leverage)
                     print("OK" if lev_ok else "WARN (may already be set)")
 
-                    time.sleep(0.3)  # rate limit between POST calls
-
-                    if sl_price:
-                        print(f"     Placing market order with SL at ${sl_price:,.6g} (-{args.initial_sl}%)...", end=" ")
-                    else:
-                        print(f"     Placing market order NO SL (zero-hero)...", end=" ")
-                    result = place_market_order(base_url, api_key, api_secret, symbol, qty,
-                                                stop_loss=sl_price)
+                    time.sleep(0.3)
+                    print(f"     Placing market order (no stops)...", end=" ")
+                    result = place_market_order(base_url, api_key, api_secret, symbol, qty)
                     ret_code = result.get("retCode", -1)
                     order_id = result.get("result", {}).get("orderId", "N/A")
 
@@ -705,14 +641,7 @@ def run_auto_trader(args):
                                   score, signals, "filled", order_id, "live")
                         session.record_trade(symbol, est_value)
                         trades_this_cycle += 1
-                        # Mark SL as already set so position manager doesn't re-set it
-                        state_key = f"{symbol}_Buy"
-                        pos_state[state_key] = {
-                            "initial_sl_set": True, "current_tier_pct": 0, "highest_profit": 0,
-                        }
-                        save_position_state(pos_state)
                     elif ret_code == 10001 and "position idx" in result.get("retMsg", "").lower():
-                        # Hedge mode — retry with positionIdx=1 (long)
                         print(f"hedge mode detected, retrying...", end=" ")
                         time.sleep(0.3)
                         order_link_id = f"momentum_{symbol}_{int(time.time())}"
@@ -721,8 +650,6 @@ def run_auto_trader(args):
                             "side": "Buy", "orderType": "Market", "qty": qty,
                             "orderLinkId": order_link_id, "positionIdx": 1,
                         }
-                        if sl_price:
-                            hedge_params["stopLoss"] = str(sl_price)
                         result2 = api_request(base_url, "POST", "/v5/order/create",
                                               api_key, api_secret, hedge_params)
                         if result2.get("retCode") == 0:
@@ -732,11 +659,6 @@ def run_auto_trader(args):
                                       score, signals, "filled", oid, "live")
                             session.record_trade(symbol, est_value)
                             trades_this_cycle += 1
-                            state_key = f"{symbol}_Buy"
-                            pos_state[state_key] = {
-                                "initial_sl_set": True, "current_tier_pct": 0, "highest_profit": 0,
-                            }
-                            save_position_state(pos_state)
                         else:
                             print(f"FAILED: {result2.get('retMsg')}")
                             log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
@@ -748,30 +670,26 @@ def run_auto_trader(args):
 
                 print()
 
-        # Manage existing positions (trailing stops)
-        pos_state = manage_positions(base_url, api_key, api_secret,
-                                     args.initial_sl, args.live, pos_state)
+        # P&L display
+        if paper:
+            paper.update_prices(base_url)
+            paper.display_positions()
+            paper.display_periodic_summary()
+        elif args.live:
+            display_live_pnl(base_url, api_key, api_secret)
 
         # Session summary
         print(f"\n  Session: {session.trades_today} trades today | "
               f"{len(session.traded_symbols)} unique coins | "
               f"${session.total_exposure:,.0f} exposure")
 
-        # Wait for next scan, but check positions every 2 min in between
-        print(f"\n  Next scan in {args.interval} min (positions checked every 1 min)... (Ctrl+C to stop)")
+        print(f"\n  Next scan in {args.interval} min... (Ctrl+C to stop)")
         try:
-            remaining = args.interval * 60
-            while remaining > 0:
-                wait = min(60, remaining)  # 1 minute or whatever is left
-                time.sleep(wait)
-                remaining -= wait
-                if remaining > 0:
-                    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-                    print(f"\n  [position check | {now} | next scan in {remaining//60}m{remaining%60:02d}s]")
-                    pos_state = manage_positions(base_url, api_key, api_secret,
-                                                 args.initial_sl, args.live, pos_state)
+            time.sleep(args.interval * 60)
         except KeyboardInterrupt:
-            print(f"\n\n{'='*70}")
+            if paper:
+                paper.display_summary()
+            print(f"\n{'='*70}")
             print(f"  AUTO-TRADER STOPPED")
             print(f"  Trades this session: {session.trades_today}")
             print(f"  Coins traded: {', '.join(session.traded_symbols) or 'none'}")
@@ -797,10 +715,6 @@ def main():
                         help=f"Minimum momentum score to trigger (default: {DEFAULT_MIN_SCORE})")
     parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL_MIN,
                         help=f"Scan interval in minutes (default: {DEFAULT_INTERVAL_MIN})")
-    parser.add_argument("--initial-sl", type=float, default=DEFAULT_INITIAL_SL_PCT,
-                        help=f"Initial stop loss %% (default: {DEFAULT_INITIAL_SL_PCT})")
-    parser.add_argument("--no-stops", action="store_true",
-                        help="Zero-hero mode: no initial SL, trailing stops only. Pair with --amount 250 (half size).")
     args = parser.parse_args()
 
     if args.live and not args.testnet:
