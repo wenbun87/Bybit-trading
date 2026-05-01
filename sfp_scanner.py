@@ -108,6 +108,7 @@ SFP_STATE_FILE = "sfp_position_state.json"
 # Paper trading defaults
 PAPER_AMOUNT_USDT = 500
 PAPER_LEVERAGE = 10
+SL_BUFFER_PCT = 0.15   # 0.15% beyond sweep price for stop loss
 
 # ──────────────────────────────────────────────
 # Rate-limited API client
@@ -694,10 +695,9 @@ GRADE_ORDER = {"A+": 0, "A": 1, "B": 2, "C": 3, "D": 4}
 class PaperTrader:
     """Tracks hypothetical trades during scan-only mode."""
 
-    def __init__(self, amount_usdt, leverage, initial_sl_pct, min_grade="B"):
+    def __init__(self, amount_usdt, leverage, min_grade="B"):
         self.amount = amount_usdt
         self.leverage = leverage
-        self.initial_sl_pct = initial_sl_pct
         self.min_grade = min_grade
         self.positions = {}       # symbol -> position dict
         self.closed_trades = []   # list of completed trade dicts
@@ -712,7 +712,7 @@ class PaperTrader:
         return trail
 
     def enter_signals(self, results):
-        """Open paper positions on qualifying signals."""
+        """Open paper positions on qualifying signals with structural stops."""
         grade_ok = GRADE_ORDER.get(self.min_grade, 2)
         entered = 0
         now = time.time()
@@ -730,14 +730,15 @@ class PaperTrader:
             sfp = r["sfp"]
             side = "long" if sfp["type"] == "BULLISH" else "short"
             entry_price = r["lastPrice"]
+            sweep_price = sfp["sweep_price"]
             qty = (self.amount * self.leverage) / entry_price
 
-            sl_price = None
-            if self.initial_sl_pct > 0:
-                if side == "long":
-                    sl_price = entry_price * (1 - self.initial_sl_pct / 100)
-                else:
-                    sl_price = entry_price * (1 + self.initial_sl_pct / 100)
+            # Structural stop: just beyond the sweep price (pattern invalidation)
+            if side == "long":
+                sl_price = sweep_price * (1 - SL_BUFFER_PCT / 100)
+            else:
+                sl_price = sweep_price * (1 + SL_BUFFER_PCT / 100)
+            sl_dist_pct = abs(entry_price - sl_price) / entry_price * 100
 
             self.positions[symbol] = {
                 "side": side,
@@ -746,15 +747,16 @@ class PaperTrader:
                 "entry_time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
                 "grade": r["grade"],
                 "sl_price": sl_price,
+                "sweep_price": sweep_price,
                 "trail_high": entry_price if side == "long" else None,
                 "trail_low": entry_price if side == "short" else None,
             }
             self.traded_symbols[symbol] = now
             entered += 1
             action = "LONG" if side == "long" else "SHORT"
-            sl_str = f"SL: {sl_price:,.4g}" if sl_price else "no SL"
             print(f"  [PAPER] {action} {symbol} @ {entry_price:,.6g} | "
-                  f"Grade {r['grade']} | ${self.amount} x{self.leverage} | {sl_str}")
+                  f"Grade {r['grade']} | ${self.amount} x{self.leverage} | "
+                  f"SL: {sl_price:,.4g} ({sl_dist_pct:.1f}% away, beyond sweep {sweep_price:,.4g})")
 
         return entered
 
@@ -836,12 +838,12 @@ class PaperTrader:
             except (KeyError, ValueError, TypeError):
                 continue
 
-        print(f"\n  {'─'*90}")
+        print(f"\n  {'─'*100}")
         print(f"  PAPER POSITIONS ({len(self.positions)} open)")
-        print(f"  {'─'*90}")
+        print(f"  {'─'*100}")
         print(f"  {'Symbol':<14} {'Side':<6} {'Grade':<6} {'Entry':>12} {'Current':>12}"
-              f"  {'P&L%':>8}  {'P&L$':>10}  {'Trail':>6}")
-        print(f"  {'─'*90}")
+              f"  {'P&L%':>8}  {'P&L$':>10}  {'SL':>12}  {'Trail':>6}")
+        print(f"  {'─'*100}")
 
         total_pnl = 0
         for symbol, pos in sorted(self.positions.items()):
@@ -862,14 +864,48 @@ class PaperTrader:
             total_pnl += pnl_usd
             trail_pct = self._get_trailing_pct(peak_pnl)
             trail_str = f"{trail_pct:.0f}%" if trail_pct > 0 else "—"
+            sl_str = f"{pos['sl_price']:,.4g}" if pos.get("sl_price") else "—"
 
             print(f"  {symbol:<14} {side.upper():<6} {pos['grade']:<6}"
                   f" {entry:>12,.6g} {price:>12,.6g}"
-                  f"  {pnl_pct:>+7.1f}%  ${pnl_usd:>+9,.2f}  {trail_str:>6}")
+                  f"  {pnl_pct:>+7.1f}%  ${pnl_usd:>+9,.2f}  {sl_str:>12}  {trail_str:>6}")
 
-        print(f"  {'─'*90}")
-        print(f"  {'Total unrealized P&L:':>60}  ${total_pnl:>+9,.2f}")
+        print(f"  {'─'*100}")
+        print(f"  {'Total unrealized P&L:':>70}  ${total_pnl:>+9,.2f}")
         print()
+
+    def display_periodic_summary(self, tickers):
+        """Quick P&L recap shown after each scan cycle."""
+        price_map = {}
+        for t in tickers:
+            try:
+                price_map[t["symbol"]] = float(t["lastPrice"])
+            except (KeyError, ValueError, TypeError):
+                continue
+
+        unrealized = 0
+        for symbol, pos in self.positions.items():
+            price = price_map.get(symbol, pos["entry_price"])
+            if pos["side"] == "long":
+                pnl_pct = (price - pos["entry_price"]) / pos["entry_price"] * 100
+            else:
+                pnl_pct = (pos["entry_price"] - price) / pos["entry_price"] * 100
+            unrealized += pnl_pct / 100 * self.amount * self.leverage
+
+        realized = sum(t["pnl_usd"] for t in self.closed_trades)
+        elapsed = time.time() - self.start_time
+        mins = int(elapsed / 60)
+
+        wins = sum(1 for t in self.closed_trades if t["pnl_usd"] >= 0)
+        losses = sum(1 for t in self.closed_trades if t["pnl_usd"] < 0)
+
+        print(f"\n  {'='*80}")
+        print(f"  PAPER P&L UPDATE ({mins}m elapsed)")
+        print(f"  {'─'*80}")
+        print(f"    Open:      {len(self.positions)} position(s) | Unrealized: ${unrealized:+,.2f}")
+        print(f"    Closed:    {len(self.closed_trades)} trade(s) | W:{wins} L:{losses} | Realized: ${realized:+,.2f}")
+        print(f"    Combined:  ${realized + unrealized:+,.2f}")
+        print(f"  {'='*80}")
 
     def display_summary(self):
         """Print final P&L summary when scanner stops."""
@@ -881,15 +917,12 @@ class PaperTrader:
         print(f"  PAPER TRADING SUMMARY")
         print(f"  Session: {int(hours)}h {int(mins)}m | "
               f"${self.amount} per trade @ {self.leverage}x leverage")
-        if self.initial_sl_pct > 0:
-            print(f"  Initial SL: {self.initial_sl_pct}% | Trailing tiers: 10%→8% | 30%→6% | 100%→3% | 300%→2%")
-        else:
-            print(f"  Zero-hero mode (no initial SL) | Trailing tiers: 10%→8% | 30%→6% | 100%→3% | 300%→2%")
+        print(f"  Stop loss: structural (beyond sweep + {SL_BUFFER_PCT}% buffer)")
+        print(f"  Trailing tiers: 10%→8% | 30%→6% | 100%→3% | 300%→2%")
         print(f"{'='*90}")
 
         all_trades = list(self.closed_trades)
 
-        # Add still-open positions as unrealized
         open_count = len(self.positions)
         if open_count > 0:
             print(f"\n  {open_count} position(s) still open (not included in realized P&L)")
@@ -910,7 +943,6 @@ class PaperTrader:
         print(f"  {'─'*85}")
 
         for t in all_trades:
-            tag = "+" if t["pnl_usd"] >= 0 else ""
             print(f"  {t['symbol']:<14} {t['side'].upper():<6} {t['grade']:<6}"
                   f" {t['entry_price']:>12,.6g} {t['exit_price']:>12,.6g}"
                   f"  {t['pnl_pct']:>+7.1f}%  ${t['pnl_usd']:>+9,.2f}  {t['reason']}")
@@ -1426,7 +1458,7 @@ def main():
     paper = None
 
     if paper_mode:
-        paper = PaperTrader(args.amount, args.leverage, args.initial_sl, args.min_grade)
+        paper = PaperTrader(args.amount, args.leverage, args.min_grade)
 
     if trading_mode:
         api_key, api_secret = get_credentials()
@@ -1457,13 +1489,10 @@ def main():
         print(f"  Struct filter:   N={args.struct_count}")
     if paper_mode:
         print(f"  Paper trade:     ${args.amount} @ {args.leverage}x | Min grade: {args.min_grade}")
-        if args.no_stops:
-            print(f"  Initial SL:      NONE — zero-hero (trailing stops only)")
-        else:
-            print(f"  Initial SL:      {args.initial_sl}%")
+        print(f"  Stop loss:       Structural (beyond sweep + {SL_BUFFER_PCT}% buffer)")
         print(f"  Trailing tiers:  10%→8% | 30%→6% | 100%→3% | 300%→2%")
         print(f"  Re-entry after:  {RE_ENTRY_COOLDOWN_HOURS}h cooldown")
-        print(f"  Press Ctrl+C to stop and see P&L summary")
+        print(f"  P&L summary shown after each scan. Ctrl+C for final summary")
     elif trading_mode:
         print(f"  Trade amount:    ${args.amount} @ {args.leverage}x")
         print(f"  Min grade:       {args.min_grade}")
@@ -1486,6 +1515,7 @@ def main():
             tickers = fetch_linear_tickers(base_url)
             paper.update_prices(tickers)
             paper.display_open_positions(tickers)
+            paper.display_periodic_summary(tickers)
 
         # Auto-trade SFP signals
         if trading_mode and results:
