@@ -64,7 +64,7 @@ DEFAULT_PIVOT_SOURCE = "wicks"    # "wicks" or "closes"
 DEFAULT_MIN_BARS_BREAKOUT = 1     # min counting-TF bars closed outside before reclaim (0 = wick-only)
 DEFAULT_MAX_BARS_BREAKOUT = 30    # max counting-TF bars before reclaim
 DEFAULT_LEVELS_TO_SCAN = 2        # recent pivot levels per side
-DEFAULT_MIN_VOLUME_M = 50         # min 24h turnover in millions USD
+DEFAULT_MIN_VOLUME_M = 10         # min 24h turnover in millions USD
 
 # MA trend filter
 DEFAULT_MA_FILTER = True
