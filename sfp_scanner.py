@@ -56,8 +56,8 @@ USER_AGENT = "bybit-skill/1.2.3"
 MIN_CALL_INTERVAL = 0.12  # 120ms between GET requests
 
 # SFP V2 detection parameters (matching TradingView SFP Scanner V2 indicator)
-DEFAULT_PIVOT_TF = "240"          # 4H — pivot computation timeframe
-DEFAULT_COUNT_TF = "15"           # 15m — breakout/reclaim detection timeframe
+DEFAULT_PIVOT_TF = "60"           # 1H — pivot computation timeframe
+DEFAULT_COUNT_TF = "5"            # 5m — breakout/reclaim + MSB/breaker detection timeframe
 DEFAULT_PIVOT_LEFT = 15           # left bars for pivot confirmation
 DEFAULT_PIVOT_RIGHT = 15          # right bars for pivot confirmation
 DEFAULT_PIVOT_SOURCE = "wicks"    # "wicks" or "closes"
@@ -68,7 +68,7 @@ DEFAULT_MIN_VOLUME_M = 10         # min 24h turnover in millions USD
 
 # MA trend filter
 DEFAULT_MA_FILTER = True
-DEFAULT_MA_TF = "240"
+DEFAULT_MA_TF = "60"
 DEFAULT_MA_TYPE = "EMA"
 DEFAULT_MA_FAST = 50
 DEFAULT_MA_SLOW = 200
@@ -76,6 +76,12 @@ DEFAULT_MA_SLOW = 200
 # Structural filter
 DEFAULT_STRUCT_FILTER = False
 DEFAULT_STRUCT_COUNT = 2
+
+# MSB + Breaker Block confirmation (on count_tf candles)
+DEFAULT_MSB_FILTER = True         # require market structure break to confirm SFP
+DEFAULT_MSB_SWING_LEFT = 3        # left bars for M5 swing point detection
+DEFAULT_MSB_SWING_RIGHT = 3       # right bars for M5 swing point detection
+DEFAULT_MSB_LOOKBACK = 50         # how many count_tf bars after SFP to look for MSB
 
 INTERVAL_LABELS = {
     "1": "1m", "3": "3m", "5": "5m", "15": "15m", "30": "30m",
@@ -315,6 +321,127 @@ def check_structure(pivot_highs, pivot_lows, count):
     return res
 
 
+def find_micro_swings(candles, left, right):
+    """Find swing highs and lows on count-TF candles (small L/R for M5 structure).
+
+    Returns (swing_highs, swing_lows) — each is list of (index, price).
+    """
+    swing_highs = []
+    swing_lows = []
+
+    for i in range(left, len(candles) - right):
+        h = candles[i].high
+        l = candles[i].low
+
+        is_high = all(candles[i - j].high <= h for j in range(1, left + 1)) and \
+                  all(candles[i + j].high <= h for j in range(1, right + 1))
+        is_low = all(candles[i - j].low >= l for j in range(1, left + 1)) and \
+                 all(candles[i + j].low >= l for j in range(1, right + 1))
+
+        if is_high:
+            swing_highs.append((i, h))
+        if is_low:
+            swing_lows.append((i, l))
+
+    return swing_highs, swing_lows
+
+
+def detect_msb(candles, swing_highs, swing_lows, sfp_candle_idx, direction, lookback):
+    """Detect a Market Structure Break after the SFP signal candle.
+
+    For bullish SFP: look for a candle that closes above the most recent M5 swing high
+    For bearish SFP: look for a candle that closes below the most recent M5 swing low
+
+    Returns (msb_candle_idx, msb_level) or (None, None).
+    """
+    search_start = sfp_candle_idx + 1
+    search_end = min(sfp_candle_idx + lookback, len(candles))
+
+    if direction == "BULLISH":
+        # Find the most recent swing high before/at the SFP candle
+        relevant = [(i, p) for i, p in swing_highs if i <= sfp_candle_idx]
+        if not relevant:
+            return None, None
+        _, level = relevant[-1]
+        for ci in range(search_start, search_end):
+            if candles[ci].close > level:
+                return ci, level
+    else:
+        relevant = [(i, p) for i, p in swing_lows if i <= sfp_candle_idx]
+        if not relevant:
+            return None, None
+        _, level = relevant[-1]
+        for ci in range(search_start, search_end):
+            if candles[ci].close < level:
+                return ci, level
+
+    return None, None
+
+
+def detect_breaker_block(candles, msb_candle_idx, sfp_candle_idx, direction):
+    """Find the breaker block: last opposite candle before the MSB.
+
+    Bullish: last red (bearish) candle between SFP and MSB — its high/low zone is the breaker
+    Bearish: last green (bullish) candle between SFP and MSB
+
+    Returns dict with breaker block info or None.
+    """
+    search_start = max(sfp_candle_idx, 0)
+
+    if direction == "BULLISH":
+        for ci in range(msb_candle_idx - 1, search_start - 1, -1):
+            c = candles[ci]
+            if not c.is_green:  # bearish candle
+                return {
+                    "index": ci,
+                    "high": c.high,
+                    "low": c.low,
+                    "open": c.open,
+                    "close": c.close,
+                    "time": c.time,
+                }
+    else:
+        for ci in range(msb_candle_idx - 1, search_start - 1, -1):
+            c = candles[ci]
+            if c.is_green:  # bullish candle
+                return {
+                    "index": ci,
+                    "high": c.high,
+                    "low": c.low,
+                    "open": c.open,
+                    "close": c.close,
+                    "time": c.time,
+                }
+
+    return None
+
+
+def confirm_sfp_msb_bb(candles, sfp, swing_highs, swing_lows, msb_lookback):
+    """Run MSB + breaker block confirmation on an SFP signal.
+
+    Returns dict with msb/bb info if confirmed, else None.
+    """
+    direction = sfp["type"]
+    total = len(candles)
+    sfp_candle_idx = total - 1 - sfp["candles_ago"]
+
+    msb_idx, msb_level = detect_msb(candles, swing_highs, swing_lows,
+                                     sfp_candle_idx, direction, msb_lookback)
+    if msb_idx is None:
+        return None
+
+    bb = detect_breaker_block(candles, msb_idx, sfp_candle_idx, direction)
+
+    return {
+        "msb_confirmed": True,
+        "msb_candle_idx": msb_idx,
+        "msb_level": msb_level,
+        "msb_time": candles[msb_idx].time,
+        "msb_bars_after_sfp": msb_idx - sfp_candle_idx,
+        "breaker_block": bb,
+    }
+
+
 def detect_sfps_v2(pivot_levels, count_candles, min_bars, max_bars, consumed_levels):
     """Detect SFPs via breakout/reclaim on counting-TF candles.
 
@@ -510,6 +637,8 @@ def run_sfp_scan(base_url, args, consumed_levels):
         print(f"  MA filter: {args.ma_type} {args.ma_fast}/{args.ma_slow} on {INTERVAL_LABELS.get(args.ma_tf, args.ma_tf)}")
     if args.struct_filter:
         print(f"  Struct filter: N={args.struct_count}")
+    if args.msb_filter:
+        print(f"  MSB + BB: swing L{args.msb_swing_left}/R{args.msb_swing_right}, lookback {args.msb_lookback} bars")
     print()
 
     all_results = []
@@ -556,6 +685,12 @@ def run_sfp_scan(base_url, args, consumed_levels):
         symbol_consumed = consumed_levels.setdefault(symbol, set())
         sfps = detect_sfps_v2(levels, count_candles, args.min_bars, args.max_bars, symbol_consumed)
 
+        # Pre-compute micro swings for MSB detection (once per symbol)
+        micro_highs, micro_lows = None, None
+        if args.msb_filter and sfps:
+            micro_highs, micro_lows = find_micro_swings(
+                count_candles, args.msb_swing_left, args.msb_swing_right)
+
         for sfp in sfps:
             if args.ma_filter and trend != "neutral":
                 if sfp["type"] == "BULLISH" and trend == "bearish":
@@ -567,10 +702,20 @@ def run_sfp_scan(base_url, args, consumed_levels):
                     continue
                 if sfp["type"] == "BEARISH" and not (struct["resistances_falling"] or struct["supports_falling"]):
                     continue
+
+            # MSB + breaker block confirmation
+            msb_info = None
+            if args.msb_filter:
+                msb_info = confirm_sfp_msb_bb(
+                    count_candles, sfp, micro_highs, micro_lows, args.msb_lookback)
+                if msb_info is None:
+                    continue  # no MSB = skip this SFP
+
             all_results.append({
                 **c, "grade": grade_sfp(sfp), "sfp": sfp,
                 "trend": trend, "ma_fast": ma_fast_val, "ma_slow": ma_slow_val,
                 "pivot_tf": pivot_label, "count_tf": count_label,
+                "msb": msb_info,
             })
 
     print(f"\r  Scan complete. {_call_count} API calls made.{' ' * 40}")
@@ -606,13 +751,13 @@ def display_results(results, env_label, args):
         if not group:
             continue
         print(f"\n  {label}")
-        print(f"  {'-'*125}")
+        print(f"  {'-'*140}")
         print(
             f"  {'#':>3}  {'Grade':<6} {'Symbol':<14} {'Price':>12} {'24h%':>8}"
             f"  {'Level':>12} {'Swept':>8} {'Bars':>5} {'Reclaim':>8} {'Wick/Bdy':>9}"
-            f"  {'Ago':>4}  {'Trend':>5}  {'Volume':>12}"
+            f"  {'Ago':>4}  {'Trend':>5}  {'MSB':>4} {'BB':>3}  {'Volume':>12}"
         )
-        print(f"  {'-'*125}")
+        print(f"  {'-'*140}")
 
         for i, r in enumerate(group, 1):
             sfp = r["sfp"]
@@ -620,13 +765,16 @@ def display_results(results, env_label, args):
             ago_str = "NOW" if sfp["candles_ago"] == 0 else f"{sfp['candles_ago']}b"
             bars_str = f"{sfp['bars_outside']}b" if sfp["bars_outside"] > 0 else "wick"
             trend_str = (r.get("trend") or "?")[:5]
+            msb = r.get("msb")
+            msb_str = f"{msb['msb_bars_after_sfp']}b" if msb else "—"
+            bb_str = "Y" if msb and msb.get("breaker_block") else "—"
 
             print(
                 f"  {i:>3}  {r['grade']:<6} {r['symbol']:<14}"
                 f" {r['lastPrice']:>12,.6g} {r['change24h']:>+7.1f}%"
                 f"  {sfp['swing_level']:>12,.6g} {sfp['sweep_pct']:>7.3f}%"
                 f" {bars_str:>5} {sfp['reclaim_pct']:>7.3f}% {sfp['wick_ratio']:>8.1f}x"
-                f"  {ago_str:>4}  {trend_str:>5}  {vol_str:>12}"
+                f"  {ago_str:>4}  {trend_str:>5}  {msb_str:>4} {bb_str:>3}  {vol_str:>12}"
             )
 
     print(f"\n  {'-'*80}")
@@ -642,6 +790,8 @@ def display_results(results, env_label, args):
     print(f"    Bars      = counting-TF bars closed outside (or 'wick' for wick-only)")
     print(f"    Reclaim   = how far price closed back inside (higher = stronger rejection)")
     print(f"    Trend     = MA trend on {pivot_label}")
+    print(f"    MSB       = market structure break confirmed (bars after SFP)")
+    print(f"    BB        = breaker block found (Y/N)")
     print()
 
     top_results = results[:5]
@@ -674,6 +824,17 @@ def display_results(results, env_label, args):
                 slow = r.get("ma_slow")
                 if fast is not None and slow is not None:
                     print(f"    Trend:          {r['trend']} ({args.ma_type} {args.ma_fast}: {fast:,.4g} / {args.ma_slow}: {slow:,.4g})")
+            msb = r.get("msb")
+            if msb:
+                msb_ts = datetime.fromtimestamp(msb["msb_time"] / 1000, tz=timezone.utc)
+                msb_str = msb_ts.strftime("%Y-%m-%d %H:%M UTC")
+                print(f"    MSB:            {sfp_type.lower()} break at {msb['msb_level']:,.6g} — {msb['msb_bars_after_sfp']} bars after SFP ({msb_str})")
+                bb = msb.get("breaker_block")
+                if bb:
+                    bb_ts = datetime.fromtimestamp(bb["time"] / 1000, tz=timezone.utc)
+                    bb_str = bb_ts.strftime("%H:%M")
+                    bb_type = "bearish" if sfp_type == "BULLISH" else "bullish"
+                    print(f"    Breaker block:  {bb_type} candle at {bb_str} — zone {bb['low']:,.6g} to {bb['high']:,.6g}")
 
     print()
 
@@ -1387,9 +1548,9 @@ def main():
                         help=f"Min 24h turnover in millions USD (default: {DEFAULT_MIN_VOLUME_M})")
     # V2 detection params
     parser.add_argument("--pivot-tf", type=str, default=DEFAULT_PIVOT_TF,
-                        help=f"Pivot timeframe (default: {DEFAULT_PIVOT_TF} = 4H)")
+                        help=f"Pivot timeframe (default: {DEFAULT_PIVOT_TF} = 1H)")
     parser.add_argument("--count-tf", type=str, default=DEFAULT_COUNT_TF,
-                        help=f"Counting timeframe for breakout/reclaim (default: {DEFAULT_COUNT_TF} = 15m)")
+                        help=f"Counting timeframe for breakout/reclaim + MSB (default: {DEFAULT_COUNT_TF} = 5m)")
     parser.add_argument("--pivot-left", type=int, default=DEFAULT_PIVOT_LEFT,
                         help=f"Left bars for pivot (default: {DEFAULT_PIVOT_LEFT})")
     parser.add_argument("--pivot-right", type=int, default=DEFAULT_PIVOT_RIGHT,
@@ -1416,6 +1577,15 @@ def main():
                         default=DEFAULT_STRUCT_FILTER, help="Enable structural filter")
     parser.add_argument("--struct-count", type=int, default=DEFAULT_STRUCT_COUNT,
                         help=f"N pivots for structure direction (default: {DEFAULT_STRUCT_COUNT})")
+    # MSB + Breaker Block confirmation
+    parser.add_argument("--no-msb-filter", action="store_false", dest="msb_filter",
+                        default=DEFAULT_MSB_FILTER, help="Disable MSB + breaker block confirmation")
+    parser.add_argument("--msb-swing-left", type=int, default=DEFAULT_MSB_SWING_LEFT,
+                        help=f"Left bars for M5 swing detection (default: {DEFAULT_MSB_SWING_LEFT})")
+    parser.add_argument("--msb-swing-right", type=int, default=DEFAULT_MSB_SWING_RIGHT,
+                        help=f"Right bars for M5 swing detection (default: {DEFAULT_MSB_SWING_RIGHT})")
+    parser.add_argument("--msb-lookback", type=int, default=DEFAULT_MSB_LOOKBACK,
+                        help=f"Max count-TF bars after SFP to find MSB (default: {DEFAULT_MSB_LOOKBACK})")
     parser.add_argument("--watch", type=int, default=15, help="Rescan interval in minutes (default: 15, 0 for one-shot)")
     parser.add_argument("--save", action="store_true", help="Save results to JSON")
     # Trading flags
@@ -1487,6 +1657,8 @@ def main():
         print(f"  MA filter:       {args.ma_type} {args.ma_fast}/{args.ma_slow} on {ma_tf_label}")
     if args.struct_filter:
         print(f"  Struct filter:   N={args.struct_count}")
+    if args.msb_filter:
+        print(f"  MSB + BB filter: ON (swing L{args.msb_swing_left}/R{args.msb_swing_right}, lookback {args.msb_lookback} bars)")
     if paper_mode:
         print(f"  Paper trade:     ${args.amount} @ {args.leverage}x | Min grade: {args.min_grade}")
         print(f"  Stop loss:       Structural (beyond sweep + {SL_BUFFER_PCT}% buffer)")
