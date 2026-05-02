@@ -1416,7 +1416,7 @@ def main():
                         default=DEFAULT_STRUCT_FILTER, help="Enable structural filter")
     parser.add_argument("--struct-count", type=int, default=DEFAULT_STRUCT_COUNT,
                         help=f"N pivots for structure direction (default: {DEFAULT_STRUCT_COUNT})")
-    parser.add_argument("--watch", type=int, default=0, help="Rescan interval in minutes")
+    parser.add_argument("--watch", type=int, default=15, help="Rescan interval in minutes (default: 15, 0 for one-shot)")
     parser.add_argument("--save", action="store_true", help="Save results to JSON")
     # Trading flags
     parser.add_argument("--trade", action="store_true", help="Enable auto-trading (dry-run by default)")
