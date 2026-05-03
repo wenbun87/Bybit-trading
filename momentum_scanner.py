@@ -154,6 +154,18 @@ def fetch_funding_history(base_url: str, symbol: str) -> list[dict]:
     return data.get("result", {}).get("list", [])
 
 
+def fetch_daily_klines(base_url: str, symbol: str, limit: int = 14) -> list[list]:
+    """Fetch daily klines for multi-day trend analysis (oldest first)."""
+    data = api_get(base_url, "/v5/market/kline", {
+        "category": "linear",
+        "symbol": symbol,
+        "interval": "D",
+        "limit": str(limit),
+    })
+    klines = data.get("result", {}).get("list", [])
+    return list(reversed(klines))
+
+
 def fetch_long_short_ratio(base_url: str, symbol: str) -> list[dict]:
     """
     Fetch long/short account ratio (Bybit /v5/market/account-ratio).
@@ -651,7 +663,8 @@ def analyze_pre_squeeze_setup(funding_data: list[dict], klines: list[list],
 
 
 def analyze_crime_pump_risk(klines: list[list], oi_data: list[dict],
-                            funding_data: list[dict], turnover_24h: float) -> dict:
+                            funding_data: list[dict], turnover_24h: float,
+                            daily_klines: list[list] | None = None) -> dict:
     """
     Detect crime pump manipulation patterns from @tradinghoex's playbook.
 
@@ -661,6 +674,8 @@ def analyze_crime_pump_risk(klines: list[list], oi_data: list[dict],
       3. Parabolic run — 100%+ in 24h or 200%+ in 48h = you're the exit liquidity
       4. OI outsized vs turnover — OI > 2x daily turnover on a low-cap = manipulation
       5. Squeeze phase — negative funding + rising OI + rising price = active squeeze
+      6. Multi-day parabolic — 200%+ over 7d or 500%+ over 14d (RAVE/LAB pattern)
+      7. Derivatives frenzy — positive funding + extreme volume = sell-the-news trap
 
     Returns crime_score (0-100). >= CRIME_PUMP_BLOCK_THRESHOLD = SKIP this coin.
     """
@@ -767,6 +782,51 @@ def analyze_crime_pump_risk(klines: list[list], oi_data: list[dict],
         if current_funding < -0.02 and oi_change > 10 and roc_6h > 10:
             crime_score += 15
             flags.append("active squeeze (fund- OI+ price+)")
+
+    # 6. Multi-day parabolic (RAVE/LAB pattern) — catches coins already up 200%+ over days
+    # These coins have already done the massive run; entering now = exit liquidity
+    if daily_klines and len(daily_klines) >= 3:
+        try:
+            daily_closes = [float(k[4]) for k in daily_klines]
+            daily_lows = [float(k[3]) for k in daily_klines]
+            current_d = daily_closes[-1]
+
+            # 7-day move (or available)
+            lookback_7d = min(7, len(daily_lows))
+            low_7d = min(daily_lows[-lookback_7d:])
+            move_7d = ((current_d - low_7d) / low_7d * 100) if low_7d > 0 else 0
+
+            # 14-day move (or available)
+            low_14d = min(daily_lows)
+            move_14d = ((current_d - low_14d) / low_14d * 100) if low_14d > 0 else 0
+
+            if move_14d >= 500:
+                if in_distribution:
+                    crime_score += 30
+                    flags.append(f"+{move_14d:.0f}% in 14d, distribution (LAB pattern)")
+                elif squeeze_active:
+                    crime_score += 10
+                    flags.append(f"+{move_14d:.0f}% in 14d, squeeze active")
+                else:
+                    crime_score += 25
+                    flags.append(f"+{move_14d:.0f}% in 14d (extreme parabolic)")
+            elif move_7d >= 200:
+                if in_distribution:
+                    crime_score += 25
+                    flags.append(f"+{move_7d:.0f}% in 7d, distribution")
+                elif not squeeze_active:
+                    crime_score += 15
+                    flags.append(f"+{move_7d:.0f}% in 7d (extended)")
+        except (ValueError, TypeError, IndexError):
+            pass
+
+    # 7. Derivatives frenzy — positive funding + extreme 24h volume surge
+    # When funding flips heavily positive after a big run, the longs are crowded
+    # and market makers are about to dump on them (LAB app-launch sell-the-news)
+    if current_funding > 0.05 and move_24h >= 50:
+        pts = min(20, current_funding / 0.1 * 15)
+        crime_score += pts
+        flags.append(f"fund {current_funding:+.4f}% + {move_24h:.0f}% pump (frenzy top)")
 
     crime_score = min(100, crime_score)
     blocked = crime_score >= CRIME_PUMP_BLOCK_THRESHOLD
@@ -886,6 +946,7 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
 
         # Fetch detailed data
         klines = fetch_klines(base_url, symbol, interval="60", limit=48)  # 48h of 1h candles
+        daily_klines = fetch_daily_klines(base_url, symbol, limit=14)  # 14 days
         oi_data = fetch_open_interest(base_url, symbol)
         funding_data = fetch_funding_history(base_url, symbol)
         ls_ratio = fetch_long_short_ratio(base_url, symbol)
@@ -900,7 +961,8 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
             "squeeze_setup": analyze_squeeze_setup(funding_data, klines, oi_data, ls_ratio),
             "pre_squeeze": analyze_pre_squeeze_setup(funding_data, klines, oi_data),
             "distribution_risk": analyze_distribution_risk(klines, oi_data),
-            "crime_pump": analyze_crime_pump_risk(klines, oi_data, funding_data, c["turnover24h"]),
+            "crime_pump": analyze_crime_pump_risk(klines, oi_data, funding_data,
+                                                  c["turnover24h"], daily_klines),
         }
 
         # Hard block: skip coins flagged as crime pumps
