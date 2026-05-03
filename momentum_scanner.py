@@ -529,6 +529,111 @@ def analyze_distribution_risk(klines: list[list], oi_data: list[dict]) -> dict:
     }
 
 
+# Crime Pump Risk threshold — coins at or above this are hard-blocked
+CRIME_PUMP_BLOCK_THRESHOLD = 60
+
+
+def analyze_crime_pump_risk(klines: list[list], oi_data: list[dict],
+                            funding_data: list[dict], turnover_24h: float) -> dict:
+    """
+    Detect crime pump manipulation patterns from @tradinghoex's playbook.
+
+    Signals checked:
+      1. Vol/OI brushing — 24h volume / OI > 20x = likely fake volume
+      2. Extreme negative funding — shorts paying > 0.05% = squeeze bait trap
+      3. Parabolic run — 100%+ in 24h or 200%+ in 48h = you're the exit liquidity
+      4. OI outsized vs turnover — OI > 2x daily turnover on a low-cap = manipulation
+      5. Squeeze phase — negative funding + rising OI + rising price = active squeeze
+
+    Returns crime_score (0-100). >= CRIME_PUMP_BLOCK_THRESHOLD = SKIP this coin.
+    """
+    if len(klines) < 12 or len(oi_data) < 2 or len(funding_data) < 1:
+        return {"crime_score": 0, "blocked": False, "detail": "insufficient data", "flags": []}
+
+    try:
+        closes = [float(k[4]) for k in klines]
+        current = closes[-1]
+        low_24h = min(closes[-24:]) if len(closes) >= 24 else min(closes)
+        low_48h = min(closes)
+        recent_oi = float(oi_data[0].get("openInterest", 0))
+        current_funding = float(funding_data[0].get("fundingRate", 0)) * 100
+    except (ValueError, TypeError, IndexError):
+        return {"crime_score": 0, "blocked": False, "detail": "parse error", "flags": []}
+
+    flags = []
+    crime_score = 0
+
+    # 1. Vol/OI Brushing — fake volume detection
+    # Normal range is 3-8x, above 20x = likely brushed
+    if recent_oi > 0 and turnover_24h > 0:
+        vol_oi_ratio = turnover_24h / recent_oi
+        if vol_oi_ratio > 20:
+            pts = min(25, (vol_oi_ratio - 20) / 10 * 25)
+            crime_score += pts
+            flags.append(f"Vol/OI {vol_oi_ratio:.0f}x (brushed)")
+        elif vol_oi_ratio > 12:
+            pts = min(10, (vol_oi_ratio - 12) / 8 * 10)
+            crime_score += pts
+            flags.append(f"Vol/OI {vol_oi_ratio:.0f}x (elevated)")
+
+    # 2. Extreme negative funding — squeeze trap
+    # Deeply negative funding means shorts are paying longs heavily
+    # Entering a long here means you're joining a squeeze that may already be ending
+    if current_funding < -0.05:
+        pts = min(25, abs(current_funding) / 0.1 * 25)
+        crime_score += pts
+        flags.append(f"funding {current_funding:+.4f}% (squeeze trap)")
+    elif current_funding < -0.02:
+        pts = min(10, abs(current_funding) / 0.05 * 10)
+        crime_score += pts
+        flags.append(f"funding {current_funding:+.4f}% (negative)")
+
+    # 3. Parabolic run — already pumped, you're exit liquidity
+    move_24h = ((current - low_24h) / low_24h * 100) if low_24h > 0 else 0
+    move_48h = ((current - low_48h) / low_48h * 100) if low_48h > 0 else 0
+
+    if move_24h >= 200:
+        crime_score += 30
+        flags.append(f"+{move_24h:.0f}% in 24h (parabolic)")
+    elif move_24h >= 100:
+        crime_score += 20
+        flags.append(f"+{move_24h:.0f}% in 24h (extended)")
+    elif move_48h >= 200:
+        crime_score += 15
+        flags.append(f"+{move_48h:.0f}% in 48h (extended)")
+
+    # 4. OI outsized relative to daily turnover
+    # If OI is 2x+ daily turnover, positions are way larger than real trading activity
+    if turnover_24h > 0 and recent_oi > 0:
+        oi_turnover_ratio = recent_oi / turnover_24h
+        if oi_turnover_ratio > 3:
+            pts = min(15, (oi_turnover_ratio - 3) * 5)
+            crime_score += pts
+            flags.append(f"OI {oi_turnover_ratio:.1f}x turnover (outsized)")
+
+    # 5. Active squeeze pattern: negative funding + rising OI + rising price
+    # This is the exact MYX playbook — you're entering mid-squeeze
+    if len(oi_data) >= 2:
+        oldest_oi = float(oi_data[-1].get("openInterest", 0))
+        oi_change = ((recent_oi - oldest_oi) / oldest_oi * 100) if oldest_oi > 0 else 0
+
+        roc_6h = ((closes[-1] - closes[-6]) / closes[-6] * 100) if len(closes) >= 6 and closes[-6] > 0 else 0
+
+        if current_funding < -0.02 and oi_change > 10 and roc_6h > 10:
+            crime_score += 15
+            flags.append("active squeeze (fund- OI+ price+)")
+
+    crime_score = min(100, crime_score)
+    blocked = crime_score >= CRIME_PUMP_BLOCK_THRESHOLD
+
+    return {
+        "crime_score": round(crime_score, 1),
+        "blocked": blocked,
+        "flags": flags,
+        "detail": " | ".join(flags) if flags else "clean",
+    }
+
+
 # ──────────────────────────────────────────────
 # Composite scoring
 # ──────────────────────────────────────────────
@@ -636,7 +741,12 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
             "streak": analyze_streak(klines),
             "squeeze_setup": analyze_squeeze_setup(funding_data, klines, oi_data, ls_ratio),
             "distribution_risk": analyze_distribution_risk(klines, oi_data),
+            "crime_pump": analyze_crime_pump_risk(klines, oi_data, funding_data, c["turnover24h"]),
         }
+
+        # Hard block: skip coins flagged as crime pumps
+        if signals["crime_pump"]["blocked"]:
+            continue
 
         momentum_score = compute_momentum_score(signals)
 
@@ -683,10 +793,10 @@ def display_results(results: list[dict], env_label: str):
     # Header
     print(
         f"{'#':>3}  {'Symbol':<14} {'Price':>12} {'24h%':>8} {'Score':>6} {'Alert':<12}"
-        f"  {'Vol':>5} {'PrAcc':>5} {'OI':>5} {'Sqz':>5} {'Strk':>5} {'Pen':>5}"
+        f"  {'Vol':>5} {'PrAcc':>5} {'OI':>5} {'Sqz':>5} {'Strk':>5} {'Pen':>5} {'Crime':>5}"
         f"  {'Key Signal':<30}"
     )
-    print("-" * 140)
+    print("-" * 150)
 
     for i, r in enumerate(results, 1):
         s = r["signals"]
@@ -696,6 +806,7 @@ def display_results(results: list[dict], env_label: str):
         sq_s = s["squeeze_setup"]["score"]
         st_s = s["streak"]["score"]
         pen = s["distribution_risk"]["penalty"]
+        crime = s["crime_pump"]["crime_score"]
 
         # Pick the strongest signal as the key signal
         signal_scores = [
@@ -712,11 +823,11 @@ def display_results(results: list[dict], env_label: str):
 
         print(
             f"{i:>3}  {r['symbol']:<14} {r['lastPrice']:>12,.6g} {r['change24h']:>+7.1f}% {r['momentum_score']:>5.1f} {alert:<12}"
-            f"  {vol_s:>5.0f} {pa_s:>5.0f} {oi_s:>5.0f} {sq_s:>5.0f} {st_s:>5.0f} {-pen:>5.0f}"
+            f"  {vol_s:>5.0f} {pa_s:>5.0f} {oi_s:>5.0f} {sq_s:>5.0f} {st_s:>5.0f} {-pen:>5.0f} {crime:>5.0f}"
             f"  {key_signal:<30}"
         )
 
-    print("-" * 140)
+    print("-" * 150)
 
     # Detail section for top 5
     print(f"\n{'─'*60}")
@@ -735,6 +846,9 @@ def display_results(results: list[dict], env_label: str):
         print(f"    Streak:   {s['streak']['detail']}")
         print(f"    Squeeze:  {s['squeeze_setup']['detail']} (score {s['squeeze_setup']['score']})")
         print(f"    DistRisk: {s['distribution_risk']['detail']}")
+        crime = s["crime_pump"]
+        if crime["crime_score"] > 0:
+            print(f"    Crime:    {crime['detail']} (score {crime['crime_score']})")
 
     print(f"\n{'─'*60}")
     print(f"Score 80+ = EXTREME momentum (coin may already be spiking)")

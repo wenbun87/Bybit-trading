@@ -584,10 +584,13 @@ def run_auto_trader(args):
                 print(f"     OI:  {signals['oi_surge']['detail']}")
                 sqz = signals.get("squeeze_setup", {})
                 dist = signals.get("distribution_risk", {})
+                crime = signals.get("crime_pump", {})
                 if sqz.get("score", 0) > 0:
                     print(f"     Squeeze setup: {sqz['detail']} (score {sqz['score']})")
                 if dist.get("penalty", 0) > 0:
                     print(f"     Dist penalty:  -{dist['penalty']} pts | {dist['detail']}")
+                if crime.get("crime_score", 0) > 0:
+                    print(f"     Crime risk:    {crime['detail']} (score {crime['crime_score']})")
 
                 # Volume filter: skip coins with < $20M 24h volume
                 if turnover < MIN_VOLUME_24H:
