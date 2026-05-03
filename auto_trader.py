@@ -59,7 +59,7 @@ USER_AGENT = "bybit-skill/1.2.3"
 RECV_WINDOW = "5000"
 
 # Safety defaults
-DEFAULT_AMOUNT_USDT = 500       # $ per trade
+DEFAULT_AMOUNT_USDT = 250       # $ per trade
 DEFAULT_MIN_SCORE = 60          # HIGH threshold (catch momentum early)
 DEFAULT_INTERVAL_MIN = 15       # scan every 15 minutes
 MAX_TRADES_PER_CYCLE = 2        # max trades per scan cycle
@@ -131,7 +131,7 @@ def api_request(base_url: str, method: str, path: str, api_key: str,
         error_body = e.read().decode("utf-8", errors="replace")
         print(f"  HTTP {e.code}: {error_body[:200]}")
         return {"retCode": -1, "retMsg": str(e)}
-    except urllib.error.URLError as e:
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
         print(f"  Network error: {e}")
         return {"retCode": -1, "retMsg": str(e)}
 

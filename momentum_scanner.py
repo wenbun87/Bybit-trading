@@ -104,7 +104,7 @@ def api_get(base_url: str, path: str, params: dict | None = None) -> dict:
                 time.sleep(wait)
                 return api_get(base_url, path, params)  # retry
             return data
-    except urllib.error.URLError as e:
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
         return {"retCode": -1, "result": {}}
 
 

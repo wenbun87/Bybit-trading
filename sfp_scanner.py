@@ -153,7 +153,7 @@ def api_get(base_url, path, params=None):
                 time.sleep(0.5 + _rate_limit_hits * 0.5)
                 return api_get(base_url, path, params)
             return data
-    except urllib.error.URLError:
+    except (urllib.error.URLError, TimeoutError, OSError):
         return {"retCode": -1, "result": {}}
 
 
