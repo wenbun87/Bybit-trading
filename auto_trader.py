@@ -294,7 +294,8 @@ class MomentumPaperTrader:
         self.positions[symbol] = {
             "entry_price": price,
             "qty": qty,
-            "entry_time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+            "entry_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "entry_unix": time.time(),
             "score": score,
         }
         print(f"  [PAPER] LONG {symbol} @ {price:,.6g} | "
@@ -316,29 +317,44 @@ class MomentumPaperTrader:
             if price:
                 pos["current_price"] = price
 
+    def _format_elapsed(self, seconds):
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        if seconds < 3600:
+            return f"{int(seconds/60)}m"
+        if seconds < 86400:
+            h = int(seconds / 3600)
+            m = int((seconds % 3600) / 60)
+            return f"{h}h{m}m" if m else f"{h}h"
+        d = int(seconds / 86400)
+        h = int((seconds % 86400) / 3600)
+        return f"{d}d{h}h" if h else f"{d}d"
+
     def display_positions(self):
         if not self.positions:
             return
-        print(f"\n  {'─'*90}")
+        print(f"\n  {'─'*115}")
         print(f"  PAPER POSITIONS ({len(self.positions)} open)")
-        print(f"  {'─'*90}")
+        print(f"  {'─'*115}")
         print(f"  {'Symbol':<14} {'Score':>6} {'Entry':>12} {'Current':>12}"
-              f"  {'P&L%':>8}  {'P&L$':>10}")
-        print(f"  {'─'*90}")
+              f"  {'P&L%':>8}  {'P&L$':>10}  {'Entered':<22}  {'Held':>6}")
+        print(f"  {'─'*115}")
 
         total_pnl = 0
+        now = time.time()
         for symbol, pos in sorted(self.positions.items()):
             price = pos.get("current_price", pos["entry_price"])
             entry = pos["entry_price"]
             pnl_pct = (price - entry) / entry * 100
             pnl_usd = pnl_pct / 100 * self.amount * self.leverage
             total_pnl += pnl_usd
+            held = self._format_elapsed(now - pos.get("entry_unix", now))
 
             print(f"  {symbol:<14} {pos['score']:>6.0f} {entry:>12,.6g} {price:>12,.6g}"
-                  f"  {pnl_pct:>+7.1f}%  ${pnl_usd:>+9,.2f}")
+                  f"  {pnl_pct:>+7.1f}%  ${pnl_usd:>+9,.2f}  {pos['entry_time']:<22}  {held:>6}")
 
-        print(f"  {'─'*90}")
-        print(f"  {'Total unrealized P&L:':>60}  ${total_pnl:>+9,.2f}")
+        print(f"  {'─'*115}")
+        print(f"  {'Total unrealized P&L:':>85}  ${total_pnl:>+9,.2f}")
         print()
 
     def display_periodic_summary(self):
@@ -374,14 +390,15 @@ class MomentumPaperTrader:
             return
 
         print(f"\n  ALL POSITIONS ({len(self.positions)}):")
-        print(f"  {'─'*85}")
+        print(f"  {'─'*115}")
         print(f"  {'Symbol':<14} {'Score':>6} {'Entry':>12} {'Current':>12}"
-              f"  {'P&L%':>8}  {'P&L$':>10}  {'Entered'}")
-        print(f"  {'─'*85}")
+              f"  {'P&L%':>8}  {'P&L$':>10}  {'Entered':<22}  {'Held':>6}")
+        print(f"  {'─'*115}")
 
         total_pnl = 0
         wins = 0
         losses = 0
+        now = time.time()
         for symbol, pos in sorted(self.positions.items(), key=lambda x: x[1].get("current_price", x[1]["entry_price"]) / x[1]["entry_price"] - 1, reverse=True):
             price = pos.get("current_price", pos["entry_price"])
             entry = pos["entry_price"]
@@ -392,9 +409,10 @@ class MomentumPaperTrader:
                 wins += 1
             else:
                 losses += 1
+            held = self._format_elapsed(now - pos.get("entry_unix", now))
 
             print(f"  {symbol:<14} {pos['score']:>6.0f} {entry:>12,.6g} {price:>12,.6g}"
-                  f"  {pnl_pct:>+7.1f}%  ${pnl_usd:>+9,.2f}  {pos['entry_time']}")
+                  f"  {pnl_pct:>+7.1f}%  ${pnl_usd:>+9,.2f}  {pos['entry_time']:<22}  {held:>6}")
 
         print(f"  {'─'*85}")
         total_trades = len(self.positions)

@@ -872,6 +872,19 @@ class PaperTrader:
                 trail = trail_pct
         return trail
 
+    def _format_elapsed(self, seconds):
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        if seconds < 3600:
+            return f"{int(seconds/60)}m"
+        if seconds < 86400:
+            h = int(seconds / 3600)
+            m = int((seconds % 3600) / 60)
+            return f"{h}h{m}m" if m else f"{h}h"
+        d = int(seconds / 86400)
+        h = int((seconds % 86400) / 3600)
+        return f"{d}d{h}h" if h else f"{d}d"
+
     def enter_signals(self, results):
         """Open paper positions on qualifying signals with structural stops."""
         grade_ok = GRADE_ORDER.get(self.min_grade, 2)
@@ -905,7 +918,8 @@ class PaperTrader:
                 "side": side,
                 "entry_price": entry_price,
                 "qty": qty,
-                "entry_time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                "entry_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "entry_unix": time.time(),
                 "grade": r["grade"],
                 "sl_price": sl_price,
                 "sweep_price": sweep_price,
@@ -981,7 +995,9 @@ class PaperTrader:
                 "pnl_usd": pnl_usd,
                 "reason": reason,
                 "entry_time": pos["entry_time"],
-                "exit_time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                "entry_unix": pos.get("entry_unix", time.time()),
+                "exit_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "exit_unix": time.time(),
             })
             tag = "+" if pnl_usd >= 0 else ""
             print(f"  [PAPER EXIT] {symbol} | {reason} | "
@@ -999,14 +1015,15 @@ class PaperTrader:
             except (KeyError, ValueError, TypeError):
                 continue
 
-        print(f"\n  {'─'*100}")
+        print(f"\n  {'─'*135}")
         print(f"  PAPER POSITIONS ({len(self.positions)} open)")
-        print(f"  {'─'*100}")
+        print(f"  {'─'*135}")
         print(f"  {'Symbol':<14} {'Side':<6} {'Grade':<6} {'Entry':>12} {'Current':>12}"
-              f"  {'P&L%':>8}  {'P&L$':>10}  {'SL':>12}  {'Trail':>6}")
-        print(f"  {'─'*100}")
+              f"  {'P&L%':>8}  {'P&L$':>10}  {'SL':>12}  {'Trail':>6}  {'Entered':<22}  {'Held':>6}")
+        print(f"  {'─'*135}")
 
         total_pnl = 0
+        now = time.time()
         for symbol, pos in sorted(self.positions.items()):
             price = price_map.get(symbol, pos["entry_price"])
             side = pos["side"]
@@ -1026,13 +1043,15 @@ class PaperTrader:
             trail_pct = self._get_trailing_pct(peak_pnl)
             trail_str = f"{trail_pct:.0f}%" if trail_pct > 0 else "—"
             sl_str = f"{pos['sl_price']:,.4g}" if pos.get("sl_price") else "—"
+            held = self._format_elapsed(now - pos.get("entry_unix", now))
 
             print(f"  {symbol:<14} {side.upper():<6} {pos['grade']:<6}"
                   f" {entry:>12,.6g} {price:>12,.6g}"
-                  f"  {pnl_pct:>+7.1f}%  ${pnl_usd:>+9,.2f}  {sl_str:>12}  {trail_str:>6}")
+                  f"  {pnl_pct:>+7.1f}%  ${pnl_usd:>+9,.2f}  {sl_str:>12}  {trail_str:>6}"
+                  f"  {pos['entry_time']:<22}  {held:>6}")
 
-        print(f"  {'─'*100}")
-        print(f"  {'Total unrealized P&L:':>70}  ${total_pnl:>+9,.2f}")
+        print(f"  {'─'*135}")
+        print(f"  {'Total unrealized P&L:':>105}  ${total_pnl:>+9,.2f}")
         print()
 
     def display_periodic_summary(self, tickers):
@@ -1098,17 +1117,18 @@ class PaperTrader:
         total_pnl = sum(t["pnl_usd"] for t in all_trades)
 
         print(f"\n  CLOSED TRADES ({len(all_trades)}):")
-        print(f"  {'─'*85}")
+        print(f"  {'─'*125}")
         print(f"  {'Symbol':<14} {'Side':<6} {'Grade':<6} {'Entry':>12} {'Exit':>12}"
-              f"  {'P&L%':>8}  {'P&L$':>10}  {'Reason'}")
-        print(f"  {'─'*85}")
+              f"  {'P&L%':>8}  {'P&L$':>10}  {'Held':>6}  {'Entered':<22}  {'Reason'}")
+        print(f"  {'─'*125}")
 
         for t in all_trades:
+            held = self._format_elapsed(t.get("exit_unix", 0) - t.get("entry_unix", 0))
             print(f"  {t['symbol']:<14} {t['side'].upper():<6} {t['grade']:<6}"
                   f" {t['entry_price']:>12,.6g} {t['exit_price']:>12,.6g}"
-                  f"  {t['pnl_pct']:>+7.1f}%  ${t['pnl_usd']:>+9,.2f}  {t['reason']}")
+                  f"  {t['pnl_pct']:>+7.1f}%  ${t['pnl_usd']:>+9,.2f}  {held:>6}  {t['entry_time']:<22}  {t['reason']}")
 
-        print(f"  {'─'*85}")
+        print(f"  {'─'*125}")
         print(f"\n  RESULTS:")
         print(f"    Total trades:  {len(all_trades)}")
         print(f"    Wins:          {len(wins)} ({len(wins)/len(all_trades)*100:.0f}%)")
