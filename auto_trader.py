@@ -605,6 +605,9 @@ def run_auto_trader(args):
                 pre = signals.get("pre_squeeze", {})
                 dist = signals.get("distribution_risk", {})
                 crime = signals.get("crime_pump", {})
+                acc = signals.get("accumulation", {})
+                if acc.get("score", 0) > 0:
+                    print(f"     ACCUMULATION:  {acc['detail']} (score {acc['score']}, phase: {acc.get('phase', '?')})")
                 if pre.get("score", 0) > 0:
                     phase = pre.get("phase", "?")
                     print(f"     PRE-SQUEEZE:   {pre['detail']} (score {pre['score']}, phase: {phase})")

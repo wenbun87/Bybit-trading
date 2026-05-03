@@ -46,11 +46,12 @@ MIN_CALL_INTERVAL_POST = 0.32  # 320ms between POST requests
 
 # Scoring weights (sum = 1.0)
 WEIGHTS = {
-    "volume_anomaly": 0.20,
-    "price_accel":    0.15,
-    "oi_surge":       0.15,
-    "squeeze_setup":  0.15,   # negative funding + rising OI + rising price (now)
-    "pre_squeeze":    0.25,   # MYX-style trap pattern (sustained setup) — biggest weight
+    "volume_anomaly": 0.10,
+    "price_accel":    0.10,
+    "oi_surge":       0.10,
+    "squeeze_setup":  0.10,   # negative funding + rising OI + rising price (now)
+    "pre_squeeze":    0.20,   # MYX-style trap pattern (sustained setup)
+    "accumulation":   0.30,   # early accumulation — volume ramp, OI from dead, quiet buildup
     "streak":         0.10,
 }
 
@@ -62,7 +63,7 @@ VOLUME_ALERT_MULTIPLIER = 3.0     # 3x average volume = notable
 VOLUME_EXTREME_MULTIPLIER = 8.0   # 8x+ = extreme
 OI_CHANGE_ALERT_PCT = 5.0         # 5% OI increase in recent window
 PRICE_ACCEL_THRESHOLD = 1.5       # acceleration ratio threshold
-MIN_TURNOVER_24H = 500_000        # skip low-liquidity coins (< $500k)
+MIN_TURNOVER_24H = 100_000        # lowered to catch quiet coins waking up
 MIN_PRICE_CHANGE_PCT = 1.0        # skip coins with < 1% move (noise filter)
 
 # ──────────────────────────────────────────────
@@ -476,6 +477,157 @@ def analyze_squeeze_setup(funding_data: list[dict], klines: list[list],
         "roc_6h": round(roc_6h, 2),
         "ls_bonus": round(ls_bonus, 1),
         "detail": detail,
+    }
+
+
+def analyze_accumulation(daily_klines: list[list], oi_data: list[dict],
+                         funding_data: list[dict], turnover_24h: float) -> dict:
+    """
+    Detect early accumulation — the quiet buildup before a pump.
+
+    This catches RAVE/LAB/STO coins 1-5 days before the explosive move,
+    when insiders are quietly positioning and volume is just waking up.
+
+    Signals:
+      1. Volume ramp — recent 3-day avg turnover vs 14-day avg (2x+ = accumulating)
+      2. OI building from low base — new interest appearing in a quiet coin
+      3. Price coiling — tight range or slight grind up (not pumping yet)
+      4. Negative funding on quiet coin — early shorts arriving = future fuel
+      5. Turnover awakening — absolute turnover very low but growing
+
+    Score 0-100. Higher = stronger accumulation signal.
+    """
+    if not daily_klines or len(daily_klines) < 5:
+        return {"score": 0, "detail": "insufficient daily data", "phase": "unknown"}
+
+    try:
+        d_closes = [float(k[4]) for k in daily_klines]
+        d_highs = [float(k[2]) for k in daily_klines]
+        d_lows = [float(k[3]) for k in daily_klines]
+        d_turnovers = [float(k[6]) for k in daily_klines]
+    except (ValueError, TypeError, IndexError):
+        return {"score": 0, "detail": "parse error", "phase": "unknown"}
+
+    current = d_closes[-1]
+    if current <= 0:
+        return {"score": 0, "detail": "zero price", "phase": "unknown"}
+
+    flags = []
+    score = 0
+
+    # Signal 1: Volume ramp — recent volume vs baseline
+    # The key accumulation signal: turnover climbing from dead levels
+    recent_3d = d_turnovers[-3:] if len(d_turnovers) >= 3 else d_turnovers[-1:]
+    avg_recent = sum(recent_3d) / len(recent_3d)
+
+    older = d_turnovers[:-3] if len(d_turnovers) > 3 else d_turnovers[:1]
+    avg_baseline = sum(older) / len(older) if older else 1
+
+    if avg_baseline > 0:
+        vol_ramp = avg_recent / avg_baseline
+    else:
+        vol_ramp = 0
+
+    if vol_ramp >= 5:
+        score += 30
+        flags.append(f"vol ramp {vol_ramp:.1f}x (strong)")
+    elif vol_ramp >= 3:
+        score += 25
+        flags.append(f"vol ramp {vol_ramp:.1f}x")
+    elif vol_ramp >= 2:
+        score += 15
+        flags.append(f"vol ramp {vol_ramp:.1f}x (early)")
+    elif vol_ramp >= 1.5:
+        score += 8
+        flags.append(f"vol ramp {vol_ramp:.1f}x (slight)")
+
+    # Signal 2: OI building from low base
+    # Rising OI on a quiet coin = new positions being opened
+    if len(oi_data) >= 6:
+        try:
+            recent_oi = float(oi_data[0].get("openInterest", 0))
+            oldest_oi = float(oi_data[-1].get("openInterest", 0))
+            if oldest_oi > 0:
+                oi_ramp = (recent_oi - oldest_oi) / oldest_oi * 100
+                if oi_ramp >= 30:
+                    score += 25
+                    flags.append(f"OI +{oi_ramp:.0f}% (building fast)")
+                elif oi_ramp >= 15:
+                    score += 18
+                    flags.append(f"OI +{oi_ramp:.0f}% (building)")
+                elif oi_ramp >= 5:
+                    score += 10
+                    flags.append(f"OI +{oi_ramp:.0f}%")
+        except (ValueError, TypeError):
+            pass
+
+    # Signal 3: Price coiling — tight daily range, not already pumped
+    # Accumulation happens during quiet, boring price action
+    recent_5d_high = max(d_highs[-5:]) if len(d_highs) >= 5 else max(d_highs)
+    recent_5d_low = min(d_lows[-5:]) if len(d_lows) >= 5 else min(d_lows)
+    range_5d = (recent_5d_high - recent_5d_low) / recent_5d_low * 100 if recent_5d_low > 0 else 999
+
+    if range_5d < 10:
+        score += 20
+        flags.append(f"coiling {range_5d:.1f}% 5d range (very tight)")
+    elif range_5d < 20:
+        score += 12
+        flags.append(f"coiling {range_5d:.1f}% 5d range")
+    elif range_5d < 30:
+        score += 5
+        flags.append(f"{range_5d:.1f}% 5d range")
+    elif range_5d > 80:
+        # Already pumped hard — not accumulation, this is mid-move
+        score -= 15
+        flags.append(f"already {range_5d:.0f}% 5d range (too extended)")
+
+    # Signal 4: Negative funding on a quiet coin = shorts arriving early
+    # Before a pump, smart shorts pile in because they've seen the pattern.
+    # This becomes squeeze fuel when the pump starts.
+    if funding_data and len(funding_data) >= 2:
+        try:
+            funding_rates = [float(f.get("fundingRate", 0)) * 100 for f in funding_data[:6]]
+            neg_count = sum(1 for f in funding_rates if f < 0)
+            avg_funding = sum(funding_rates) / len(funding_rates)
+
+            if neg_count >= 4 and range_5d < 30:
+                score += 15
+                flags.append(f"fund neg {neg_count}/{len(funding_rates)}c = fuel")
+            elif neg_count >= 2 and range_5d < 30:
+                score += 8
+                flags.append(f"fund neg {neg_count}/{len(funding_rates)}c")
+        except (ValueError, TypeError):
+            pass
+
+    # Signal 5: Low absolute turnover (this IS a quiet coin, not already popular)
+    # Coins with $100K-$2M turnover are the sweet spot for accumulation detection
+    # Above $10M they're already on everyone's radar
+    if turnover_24h < 2_000_000:
+        score += 10
+        flags.append(f"${turnover_24h/1e6:.1f}M turnover (under radar)")
+    elif turnover_24h < 5_000_000:
+        score += 5
+        flags.append(f"${turnover_24h/1e6:.1f}M turnover")
+    elif turnover_24h > 50_000_000:
+        # High turnover = already on everyone's radar, less accumulation edge
+        score -= 10
+
+    score = max(0, min(100, score))
+
+    if score >= 50:
+        phase = "ACCUMULATING"
+    elif score >= 30:
+        phase = "AWAKENING"
+    else:
+        phase = "no_setup"
+
+    return {
+        "score": round(score, 1),
+        "phase": phase,
+        "vol_ramp": round(vol_ramp, 2),
+        "range_5d": round(range_5d, 1),
+        "turnover_24h": turnover_24h,
+        "detail": " | ".join(flags) if flags else "quiet",
     }
 
 
@@ -905,11 +1057,12 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
     # Sort by 24h turnover to prioritize liquid coins for deep analysis
     candidates.sort(key=lambda x: x["turnover24h"], reverse=True)
 
-    # Three-pool approach to catch all setup types:
+    # Four-pool approach to catch all setup types:
     #   Pool A: Top 50 by 24h volume (established, liquid coins)
     #   Pool B: Top 30 by 24h % change (fast movers — catches active spikes)
-    #   Pool C: Top 30 flat-to-down with elevated turnover (MYX-style trap candidates
-    #           in consolidation, where the setup is built before the squeeze)
+    #   Pool C: Top 30 flat-to-down with elevated turnover (MYX-style trap candidates)
+    #   Pool D: Top 30 quiet/low-turnover coins (accumulation candidates —
+    #           these are the RAVE/LAB/STO coins before anyone notices them)
     pool_a = candidates[:50]
     pool_a_symbols = {c["symbol"] for c in pool_a}
 
@@ -921,20 +1074,30 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
     pool_b_symbols = {c["symbol"] for c in pool_b}
 
     # Pool C: flat to mildly down coins with decent turnover (potential trap setups)
-    # These are coins where price isn't moving but volume/OI suggests something is brewing
     flat_candidates = [c for c in candidates
                        if c["symbol"] not in pool_a_symbols
                        and c["symbol"] not in pool_b_symbols
                        and c["turnover24h"] >= 2_000_000
                        and -10 <= c["change24h"] <= 5]
-    # Sort by turnover (more turnover during flat = more interesting)
     flat_candidates.sort(key=lambda x: x["turnover24h"], reverse=True)
     pool_c = flat_candidates[:30]
+    pool_c_symbols = {c["symbol"] for c in pool_c}
 
-    scan_pool = pool_a + pool_b + pool_c
+    # Pool D: quiet low-turnover coins — the accumulation sweet spot
+    # $100K-$5M daily turnover, any price direction, not in other pools
+    # These are under-the-radar coins where volume may be just starting to wake up
+    quiet_candidates = [c for c in candidates
+                        if c["symbol"] not in pool_a_symbols
+                        and c["symbol"] not in pool_b_symbols
+                        and c["symbol"] not in pool_c_symbols
+                        and c["turnover24h"] <= 5_000_000]
+    quiet_candidates.sort(key=lambda x: x["turnover24h"], reverse=True)
+    pool_d = quiet_candidates[:30]
+
+    scan_pool = pool_a + pool_b + pool_c + pool_d
 
     print(f"  {len(tickers)} perps found → {len(candidates)} candidates after filters")
-    print(f"  Scan pool: {len(pool_a)} by volume + {len(pool_b)} by % change + {len(pool_c)} flat (trap setups) = {len(scan_pool)} coins")
+    print(f"  Scan pool: {len(pool_a)} volume + {len(pool_b)} movers + {len(pool_c)} flat + {len(pool_d)} quiet (accumulation) = {len(scan_pool)} coins")
     print()
 
     results = []
@@ -960,6 +1123,7 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
             "streak": analyze_streak(klines),
             "squeeze_setup": analyze_squeeze_setup(funding_data, klines, oi_data, ls_ratio),
             "pre_squeeze": analyze_pre_squeeze_setup(funding_data, klines, oi_data),
+            "accumulation": analyze_accumulation(daily_klines, oi_data, funding_data, c["turnover24h"]),
             "distribution_risk": analyze_distribution_risk(klines, oi_data),
             "crime_pump": analyze_crime_pump_risk(klines, oi_data, funding_data,
                                                   c["turnover24h"], daily_klines),
@@ -1014,13 +1178,14 @@ def display_results(results: list[dict], env_label: str):
     # Header
     print(
         f"{'#':>3}  {'Symbol':<14} {'Price':>12} {'24h%':>8} {'Score':>6} {'Alert':<12}"
-        f"  {'Vol':>5} {'PrAcc':>5} {'OI':>5} {'Sqz':>5} {'PreSq':>5} {'Strk':>5} {'Pen':>5} {'Crime':>5}"
-        f"  {'Phase':<12}  {'Key Signal':<30}"
+        f"  {'Accum':>5} {'Vol':>5} {'OI':>5} {'Sqz':>5} {'PreSq':>5} {'PrAc':>5} {'Strk':>5} {'Pen':>5} {'Crime':>5}"
+        f"  {'Phase':<14}  {'Key Signal':<30}"
     )
-    print("-" * 165)
+    print("-" * 175)
 
     for i, r in enumerate(results, 1):
         s = r["signals"]
+        acc_s = s["accumulation"]["score"]
         vol_s = s["volume_anomaly"]["score"]
         pa_s = s["price_accel"]["score"]
         oi_s = s["oi_surge"]["score"]
@@ -1029,10 +1194,20 @@ def display_results(results: list[dict], env_label: str):
         st_s = s["streak"]["score"]
         pen = s["distribution_risk"]["penalty"]
         crime = s["crime_pump"]["crime_score"]
-        phase = s["pre_squeeze"].get("phase", "—")
+
+        # Show the most relevant phase
+        acc_phase = s["accumulation"].get("phase", "—")
+        pre_phase = s["pre_squeeze"].get("phase", "—")
+        if acc_phase in ("ACCUMULATING", "AWAKENING"):
+            phase = acc_phase
+        elif pre_phase in ("TRAP_SET", "ACCUMULATING"):
+            phase = pre_phase
+        else:
+            phase = "—"
 
         # Pick the strongest signal as the key signal
         signal_scores = [
+            ("accumulation", acc_s),
             ("volume_anomaly", vol_s),
             ("price_accel", pa_s),
             ("oi_surge", oi_s),
@@ -1047,8 +1222,8 @@ def display_results(results: list[dict], env_label: str):
 
         print(
             f"{i:>3}  {r['symbol']:<14} {r['lastPrice']:>12,.6g} {r['change24h']:>+7.1f}% {r['momentum_score']:>5.1f} {alert:<12}"
-            f"  {vol_s:>5.0f} {pa_s:>5.0f} {oi_s:>5.0f} {sq_s:>5.0f} {ps_s:>5.0f} {st_s:>5.0f} {-pen:>5.0f} {crime:>5.0f}"
-            f"  {phase:<12}  {key_signal:<30}"
+            f"  {acc_s:>5.0f} {vol_s:>5.0f} {oi_s:>5.0f} {sq_s:>5.0f} {ps_s:>5.0f} {pa_s:>5.0f} {st_s:>5.0f} {-pen:>5.0f} {crime:>5.0f}"
+            f"  {phase:<14}  {key_signal:<30}"
         )
 
     print("-" * 165)
@@ -1063,6 +1238,9 @@ def display_results(results: list[dict], env_label: str):
         pen = s["distribution_risk"]["penalty"]
         pen_str = f"  [PENALTY -{pen:.0f}]" if pen > 0 else ""
         print(f"\n  {r['symbol']}  (Score: {r['momentum_score']}){pen_str}  24h: {r['change24h']:+.1f}%")
+        acc = s["accumulation"]
+        if acc["score"] > 0:
+            print(f"    ACCUM:    {acc['detail']} (score {acc['score']}, phase: {acc['phase']})")
         print(f"    Volume:   {s['volume_anomaly']['detail']}")
         print(f"    PrAccel:  {s['price_accel']['detail']}")
         print(f"    OI Surge: {s['oi_surge']['detail']}")
