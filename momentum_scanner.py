@@ -183,6 +183,118 @@ def fetch_long_short_ratio(base_url: str, symbol: str) -> list[dict]:
 
 
 # ──────────────────────────────────────────────
+# CoinGecko supply data (free API, no key needed)
+# ──────────────────────────────────────────────
+
+_cg_symbol_map: dict[str, str] = {}   # symbol -> coingecko id
+_cg_supply_cache: dict[str, dict] = {}  # symbol -> supply data
+_cg_cache_ts: float = 0.0
+CG_CACHE_TTL = 3600  # refresh every hour
+CG_BASE = "https://api.coingecko.com/api/v3"
+
+
+def _cg_get(url: str) -> dict | list | None:
+    """Rate-limited GET to CoinGecko free API."""
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "bybit-accumulation-scanner/1.0",
+        "Accept": "application/json",
+    })
+    try:
+        time.sleep(2.5)  # respect 30 calls/min rate limit
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read())
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return None
+
+
+def _build_cg_symbol_map():
+    """Fetch CoinGecko coins/list and build symbol -> id mapping."""
+    global _cg_symbol_map
+    if _cg_symbol_map:
+        return
+    data = _cg_get(f"{CG_BASE}/coins/list")
+    if not data or not isinstance(data, list):
+        return
+    for coin in data:
+        sym = coin.get("symbol", "").upper()
+        cg_id = coin.get("id", "")
+        if sym and cg_id:
+            # Prefer shorter IDs (more likely to be the canonical token)
+            if sym not in _cg_symbol_map or len(cg_id) < len(_cg_symbol_map[sym]):
+                _cg_symbol_map[sym] = cg_id
+
+
+def fetch_supply_data(symbols: list[str]) -> dict[str, dict]:
+    """
+    Fetch circulating/total supply from CoinGecko for a list of Bybit symbols.
+
+    Returns dict of symbol -> {circ_supply, total_supply, circ_ratio, market_cap, fdv}
+    circ_ratio = circulating / total (0.0-1.0). Low ratio = team holds most supply.
+    """
+    global _cg_supply_cache, _cg_cache_ts
+
+    # Return cache if fresh
+    if time.time() - _cg_cache_ts < CG_CACHE_TTL and _cg_supply_cache:
+        return {s: _cg_supply_cache.get(s, {}) for s in symbols}
+
+    _build_cg_symbol_map()
+    if not _cg_symbol_map:
+        return {}
+
+    # Map Bybit symbols to CoinGecko IDs
+    # LABUSDT -> LAB -> coingecko id
+    cg_ids = []
+    sym_to_base = {}
+    for sym in symbols:
+        base = sym.replace("USDT", "")
+        cg_id = _cg_symbol_map.get(base)
+        if cg_id:
+            cg_ids.append(cg_id)
+            sym_to_base[cg_id] = sym
+
+    if not cg_ids:
+        return {}
+
+    # Batch fetch (CoinGecko supports up to 250 IDs per request)
+    result = {}
+    for i in range(0, len(cg_ids), 100):
+        batch = cg_ids[i:i+100]
+        ids_str = ",".join(batch)
+        data = _cg_get(
+            f"{CG_BASE}/coins/markets?vs_currency=usd&ids={ids_str}"
+            f"&order=market_cap_desc&per_page=100&page=1"
+        )
+        if not data or not isinstance(data, list):
+            continue
+
+        for coin in data:
+            cg_id = coin.get("id", "")
+            bybit_sym = sym_to_base.get(cg_id, "")
+            if not bybit_sym:
+                continue
+
+            circ = coin.get("circulating_supply") or 0
+            total = coin.get("total_supply") or 0
+            mcap = coin.get("market_cap") or 0
+            fdv = coin.get("fully_diluted_valuation") or 0
+
+            circ_ratio = circ / total if total > 0 else 1.0
+
+            result[bybit_sym] = {
+                "circ_supply": circ,
+                "total_supply": total,
+                "circ_ratio": round(circ_ratio, 4),
+                "market_cap": mcap,
+                "fdv": fdv,
+                "cg_id": cg_id,
+            }
+
+    _cg_supply_cache.update(result)
+    _cg_cache_ts = time.time()
+    return {s: result.get(s, {}) for s in symbols}
+
+
+# ──────────────────────────────────────────────
 # Signal analyzers
 # ──────────────────────────────────────────────
 
@@ -481,7 +593,8 @@ def analyze_squeeze_setup(funding_data: list[dict], klines: list[list],
 
 
 def analyze_accumulation(daily_klines: list[list], oi_data: list[dict],
-                         funding_data: list[dict], turnover_24h: float) -> dict:
+                         funding_data: list[dict], turnover_24h: float,
+                         supply_info: dict | None = None) -> dict:
     """
     Detect early accumulation — the quiet buildup before a pump.
 
@@ -494,6 +607,7 @@ def analyze_accumulation(daily_klines: list[list], oi_data: list[dict],
       3. Price coiling — tight range or slight grind up (not pumping yet)
       4. Negative funding on quiet coin — early shorts arriving = future fuel
       5. Turnover awakening — absolute turnover very low but growing
+      6. Low circulating supply — team holds 80%+ of supply (CoinGecko data)
 
     Score 0-100. Higher = stronger accumulation signal.
     """
@@ -609,8 +723,30 @@ def analyze_accumulation(daily_klines: list[list], oi_data: list[dict],
         score += 5
         flags.append(f"${turnover_24h/1e6:.1f}M turnover")
     elif turnover_24h > 50_000_000:
-        # High turnover = already on everyone's radar, less accumulation edge
         score -= 10
+
+    # Signal 6: Low circulating supply ratio (CoinGecko)
+    # If team/insiders hold 80%+ of supply, the float is tiny and manipulable.
+    # This is the RAVE pattern: 9 wallets held 95% of supply.
+    circ_ratio = None
+    if supply_info and supply_info.get("circ_ratio"):
+        circ_ratio = supply_info["circ_ratio"]
+        mcap = supply_info.get("market_cap", 0)
+        fdv = supply_info.get("fdv", 0)
+
+        if circ_ratio <= 0.10:
+            score += 20
+            flags.append(f"circ {circ_ratio*100:.0f}% of supply (team holds 90%+)")
+        elif circ_ratio <= 0.20:
+            score += 15
+            flags.append(f"circ {circ_ratio*100:.0f}% of supply (team holds 80%+)")
+        elif circ_ratio <= 0.35:
+            score += 8
+            flags.append(f"circ {circ_ratio*100:.0f}% of supply (low float)")
+
+        if mcap > 0 and fdv > 0 and fdv > mcap * 5:
+            score += 5
+            flags.append(f"FDV {fdv/mcap:.0f}x mcap (unlock risk)")
 
     score = max(0, min(100, score))
 
@@ -627,6 +763,7 @@ def analyze_accumulation(daily_klines: list[list], oi_data: list[dict],
         "vol_ramp": round(vol_ramp, 2),
         "range_5d": round(range_5d, 1),
         "turnover_24h": turnover_24h,
+        "circ_ratio": circ_ratio,
         "detail": " | ".join(flags) if flags else "quiet",
     }
 
@@ -1010,20 +1147,27 @@ def compute_momentum_score(signals: dict) -> float:
     return round(final, 1)
 
 
-def check_exit_signals(base_url: str, symbol: str, entry_price: float) -> dict:
+def check_exit_signals(base_url: str, symbol: str, entry_price: float,
+                       graduated_since: float | None = None) -> dict:
     """
     Check whether an open position should be exited.
 
-    Exit signals (graduated from accumulation to mainstream):
-      1. Coin now in Pool A/B — it's on everyone's radar, crowd has arrived
-      2. Funding flipped positive — shorts capitulated, squeeze fuel gone
-      3. OI dropping while price up — smart money unwinding
-      4. Price up 200%+ from entry — extreme extension, take profit
-      5. Crime pump detected — coin has entered manipulation territory
+    Exit timing is based on the RAVE/LAB lifecycle:
+      - Day 1 on leaderboard: FOMO retail piles in, price pushes higher
+      - Day 2: insiders start dumping on the newcomers
+      - So graduation to Pool A/B starts the exit WINDOW, not the trigger.
 
-    Returns: {"exit": bool, "reason": str, "signals": list[str], "pool": str}
+    Exit signals:
+      1. Graduated to Pool A/B for 12h+ — day 1 FOMO captured, exit before day 2 dump
+      2. Graduated + funding positive OR OI dropping — immediate exit (dump starting)
+      3. Funding flipped positive on its own — squeeze fuel exhausted
+      4. OI dropping while price up — smart money unwinding
+      5. Price up 200%+ from entry — extreme extension, take profit
+      6. Crime pump detected — coin hit manipulation threshold
+
+    Returns: {"exit": bool, "reason": str, "signals": list[str], "pool": str,
+              "graduated": bool, ...}
     """
-    # Get current ticker to check pool membership
     tickers = fetch_all_linear_tickers(base_url)
     ticker = None
     all_sorted = []
@@ -1044,7 +1188,8 @@ def check_exit_signals(base_url: str, symbol: str, entry_price: float) -> dict:
             continue
 
     if not ticker:
-        return {"exit": False, "reason": "ticker not found", "signals": [], "pool": "?"}
+        return {"exit": False, "reason": "ticker not found", "signals": [],
+                "pool": "?", "graduated": False}
 
     exit_signals = []
     current_price = ticker["price"]
@@ -1053,7 +1198,6 @@ def check_exit_signals(base_url: str, symbol: str, entry_price: float) -> dict:
     # Determine current pool membership
     all_sorted.sort(key=lambda x: x["turnover"], reverse=True)
     top_50_syms = {c["symbol"] for c in all_sorted[:50]}
-
     movers = [c for c in all_sorted if c["symbol"] not in top_50_syms
               and c["turnover"] >= 1_000_000 and c["change"] >= 1.0]
     movers.sort(key=lambda x: x["change"], reverse=True)
@@ -1066,46 +1210,72 @@ def check_exit_signals(base_url: str, symbol: str, entry_price: float) -> dict:
     else:
         current_pool = "D"
 
-    # Exit signal 1: graduated to Pool A or B
-    if current_pool in ("A", "B"):
-        pool_name = "top volume" if current_pool == "A" else "top gainers"
-        exit_signals.append(f"graduated to Pool {current_pool} ({pool_name}) — crowd arrived")
+    is_graduated = current_pool in ("A", "B")
 
-    # Fetch derivatives data for the coin
+    # Fetch derivatives data
     funding_data = fetch_funding_history(base_url, symbol)
     oi_data = fetch_open_interest(base_url, symbol)
     klines = fetch_klines(base_url, symbol, interval="60", limit=12)
 
-    # Exit signal 2: funding flipped positive (squeeze fuel exhausted)
+    # Check funding and OI status (used by multiple signals)
+    funding_positive = False
+    oi_dropping = False
+
     if funding_data and len(funding_data) >= 2:
         try:
             recent_rates = [float(f.get("fundingRate", 0)) * 100 for f in funding_data[:4]]
             positive_count = sum(1 for r in recent_rates if r > 0)
             avg_funding = sum(recent_rates) / len(recent_rates)
             if positive_count >= 3 or avg_funding > 0.03:
-                exit_signals.append(f"funding positive {positive_count}/{len(recent_rates)}c (avg {avg_funding:+.4f}%) — shorts gone")
+                funding_positive = True
         except (ValueError, TypeError):
             pass
 
-    # Exit signal 3: OI dropping while price is up (smart money exiting)
-    if oi_data and len(oi_data) >= 6 and pnl_pct > 10:
+    if oi_data and len(oi_data) >= 6:
         try:
             recent_oi = float(oi_data[0].get("openInterest", 0))
             older_oi = float(oi_data[-1].get("openInterest", 0))
             if older_oi > 0:
                 oi_change = (recent_oi - older_oi) / older_oi * 100
                 if oi_change < -10:
-                    exit_signals.append(f"OI dropping {oi_change:+.1f}% while up {pnl_pct:+.0f}% — distribution")
+                    oi_dropping = True
         except (ValueError, TypeError):
             pass
 
-    # Exit signal 4: extreme extension from entry
+    # Exit signal 1: graduated + stale (12h+ in Pool A/B)
+    # Day 1 on leaderboard = FOMO buying = let it ride
+    # 12h+ = day 2 approaching = time to exit
+    if is_graduated and graduated_since:
+        hours_graduated = (time.time() - graduated_since) / 3600
+        if hours_graduated >= 12:
+            exit_signals.append(f"Pool {current_pool} for {hours_graduated:.0f}h — day 2 dump risk")
+        else:
+            exit_signals.append(f"Pool {current_pool} for {hours_graduated:.1f}h — riding day 1 FOMO")
+
+    # Exit signal 2: graduated + dump signals already starting (immediate exit)
+    if is_graduated and (funding_positive or oi_dropping):
+        reasons = []
+        if funding_positive:
+            reasons.append("funding positive")
+        if oi_dropping:
+            reasons.append("OI dropping")
+        exit_signals.append(f"Pool {current_pool} + {' + '.join(reasons)} — dump starting NOW")
+
+    # Exit signal 3: funding flipped positive (even without graduation)
+    if funding_positive and pnl_pct > 20:
+        exit_signals.append(f"funding positive (avg {avg_funding:+.4f}%) while up {pnl_pct:+.0f}% — squeeze over")
+
+    # Exit signal 4: OI dropping while profitable
+    if oi_dropping and pnl_pct > 10:
+        exit_signals.append(f"OI dropping {oi_change:+.1f}% while up {pnl_pct:+.0f}% — distribution")
+
+    # Exit signal 5: extreme extension from entry
     if pnl_pct >= 200:
         exit_signals.append(f"up {pnl_pct:+.0f}% from entry — extreme extension")
-    elif pnl_pct >= 100:
-        exit_signals.append(f"up {pnl_pct:+.0f}% from entry — extended")
+    elif pnl_pct >= 100 and (funding_positive or oi_dropping):
+        exit_signals.append(f"up {pnl_pct:+.0f}% + weakening signals — take profit")
 
-    # Exit signal 5: crime pump detected on this coin
+    # Exit signal 6: crime pump detected
     if klines and funding_data and oi_data:
         daily_klines = fetch_daily_klines(base_url, symbol, limit=14)
         crime = analyze_crime_pump_risk(klines, oi_data, funding_data,
@@ -1113,9 +1283,15 @@ def check_exit_signals(base_url: str, symbol: str, entry_price: float) -> dict:
         if crime["blocked"]:
             exit_signals.append(f"crime pump detected: {crime['detail']}")
 
-    # Decision: exit if 2+ signals fire, or if any strong signal fires
-    strong_signals = [s for s in exit_signals if "graduated" in s or "crime pump" in s or "extreme extension" in s]
-    should_exit = len(exit_signals) >= 2 or len(strong_signals) >= 1
+    # Decision logic:
+    # Hard exits (any one triggers):
+    hard_exits = [s for s in exit_signals
+                  if "dump starting NOW" in s
+                  or "crime pump" in s
+                  or "extreme extension" in s
+                  or "day 2 dump risk" in s]
+    # Soft exits (need 2+ to trigger):
+    should_exit = len(hard_exits) >= 1 or len(exit_signals) >= 2
 
     reason = " | ".join(exit_signals) if exit_signals else "no exit signals"
 
@@ -1124,6 +1300,7 @@ def check_exit_signals(base_url: str, symbol: str, entry_price: float) -> dict:
         "reason": reason,
         "signals": exit_signals,
         "pool": current_pool,
+        "graduated": is_graduated,
         "pnl_pct": round(pnl_pct, 2),
         "current_price": current_price,
     }
@@ -1228,6 +1405,13 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
 
     print(f"  {len(tickers)} perps found → {len(candidates)} candidates after filters")
     print(f"  Scan pool: {len(pool_a)} volume + {len(pool_b)} movers + {len(pool_c)} flat + {len(pool_d)} quiet (accumulation) = {len(scan_pool)} coins")
+
+    # Pre-fetch CoinGecko supply data for all scan pool coins (batched, cached)
+    all_symbols = [c["symbol"] for c in scan_pool]
+    print(f"  Fetching supply data from CoinGecko...", end=" ")
+    supply_data = fetch_supply_data(all_symbols)
+    supply_found = sum(1 for s in supply_data.values() if s)
+    print(f"{supply_found}/{len(all_symbols)} coins matched")
     print()
 
     results = []
@@ -1253,7 +1437,8 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
             "streak": analyze_streak(klines),
             "squeeze_setup": analyze_squeeze_setup(funding_data, klines, oi_data, ls_ratio),
             "pre_squeeze": analyze_pre_squeeze_setup(funding_data, klines, oi_data),
-            "accumulation": analyze_accumulation(daily_klines, oi_data, funding_data, c["turnover24h"]),
+            "accumulation": analyze_accumulation(daily_klines, oi_data, funding_data,
+                                                c["turnover24h"], supply_data.get(symbol)),
             "distribution_risk": analyze_distribution_risk(klines, oi_data),
             "crime_pump": analyze_crime_pump_risk(klines, oi_data, funding_data,
                                                   c["turnover24h"], daily_klines),

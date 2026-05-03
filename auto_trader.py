@@ -288,6 +288,7 @@ class MomentumPaperTrader:
         self.leverage = leverage
         self.positions = {}       # symbol -> position dict
         self.closed_trades = []   # completed trades
+        self.graduated_at = {}    # symbol -> unix timestamp when first seen in Pool A/B
         self.start_time = time.time()
 
     def enter(self, symbol, price, score, signals):
@@ -629,6 +630,9 @@ def run_auto_trader(args):
 
         if open_symbols:
             print(f"  Checking exit signals for {len(open_symbols)} open position(s)...\n")
+            # graduation_tracker shared between paper and live
+            graduation_tracker = paper.graduated_at if paper else {}
+
             for sym in open_symbols:
                 if paper and sym in paper.positions:
                     entry_price = paper.positions[sym]["entry_price"]
@@ -643,9 +647,24 @@ def run_auto_trader(args):
                 if entry_price <= 0:
                     continue
 
-                exit_info = check_exit_signals(base_url, sym, entry_price)
+                graduated_since = graduation_tracker.get(sym)
+                exit_info = check_exit_signals(base_url, sym, entry_price, graduated_since)
                 pool_now = exit_info.get("pool", "?")
                 pnl = exit_info.get("pnl_pct", 0)
+
+                # Track graduation timestamp
+                if exit_info.get("graduated") and sym not in graduation_tracker:
+                    graduation_tracker[sym] = time.time()
+                    grad_label = "JUST NOW"
+                elif exit_info.get("graduated") and sym in graduation_tracker:
+                    hrs = (time.time() - graduation_tracker[sym]) / 3600
+                    grad_label = f"{hrs:.1f}h ago"
+                elif not exit_info.get("graduated") and sym in graduation_tracker:
+                    # Dropped back out of Pool A/B
+                    del graduation_tracker[sym]
+                    grad_label = None
+                else:
+                    grad_label = None
 
                 if exit_info["exit"]:
                     print(f"  EXIT SIGNAL: {sym} (Pool {pool_now}, {pnl:+.1f}%)")
@@ -653,8 +672,9 @@ def run_auto_trader(args):
 
                     if paper:
                         paper.exit(sym, exit_info["current_price"], exit_info["reason"])
+                        if sym in paper.graduated_at:
+                            del paper.graduated_at[sym]
                     elif args.live:
-                        # Close live position
                         for p in live_positions:
                             if p.get("symbol") == sym:
                                 size = p.get("size", "0")
@@ -677,9 +697,13 @@ def run_auto_trader(args):
                                 else:
                                     print(f"FAILED: {result.get('retMsg')}")
                                 break
+                        if sym in graduation_tracker:
+                            del graduation_tracker[sym]
                 else:
                     sig_count = len(exit_info.get("signals", []))
-                    if sig_count > 0:
+                    if grad_label:
+                        print(f"  RIDE:  {sym} (Pool {pool_now}, {pnl:+.1f}%) — graduated {grad_label}, riding day 1 FOMO")
+                    elif sig_count > 0:
                         print(f"  WATCH: {sym} (Pool {pool_now}, {pnl:+.1f}%) — {sig_count} early signal(s): {exit_info['reason']}")
                     else:
                         print(f"  HOLD:  {sym} (Pool {pool_now}, {pnl:+.1f}%) — no exit signals")
