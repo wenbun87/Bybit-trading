@@ -905,7 +905,8 @@ class PaperTrader:
             side = "long" if sfp["type"] == "BULLISH" else "short"
             entry_price = r["lastPrice"]
             sweep_price = sfp["sweep_price"]
-            qty = (self.amount * self.leverage) / entry_price
+            # Match live mode: amount = total notional (position size), not margin × leverage
+            qty = self.amount / entry_price
 
             # Structural stop: just beyond the sweep price (pattern invalidation)
             if side == "long":
@@ -984,7 +985,7 @@ class PaperTrader:
 
         for symbol, price, pnl_pct, reason in to_close:
             pos = self.positions.pop(symbol)
-            pnl_usd = pnl_pct / 100 * self.amount * self.leverage
+            pnl_usd = pnl_pct / 100 * self.amount
             self.closed_trades.append({
                 "symbol": symbol,
                 "side": pos["side"],
@@ -1038,7 +1039,7 @@ class PaperTrader:
                 peak = pos.get("trail_low", entry)
                 peak_pnl = (entry - peak) / entry * 100
 
-            pnl_usd = pnl_pct / 100 * self.amount * self.leverage
+            pnl_usd = pnl_pct / 100 * self.amount
             total_pnl += pnl_usd
             trail_pct = self._get_trailing_pct(peak_pnl)
             trail_str = f"{trail_pct:.0f}%" if trail_pct > 0 else "—"
@@ -1070,7 +1071,7 @@ class PaperTrader:
                 pnl_pct = (price - pos["entry_price"]) / pos["entry_price"] * 100
             else:
                 pnl_pct = (pos["entry_price"] - price) / pos["entry_price"] * 100
-            unrealized += pnl_pct / 100 * self.amount * self.leverage
+            unrealized += pnl_pct / 100 * self.amount
 
         realized = sum(t["pnl_usd"] for t in self.closed_trades)
         elapsed = time.time() - self.start_time

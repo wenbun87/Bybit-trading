@@ -290,7 +290,8 @@ class MomentumPaperTrader:
     def enter(self, symbol, price, score, signals):
         if symbol in self.positions:
             return
-        qty = (self.amount * self.leverage) / price
+        # Match live mode: amount = total notional (position size), not margin × leverage
+        qty = self.amount / price
         self.positions[symbol] = {
             "entry_price": price,
             "qty": qty,
@@ -346,7 +347,7 @@ class MomentumPaperTrader:
             price = pos.get("current_price", pos["entry_price"])
             entry = pos["entry_price"]
             pnl_pct = (price - entry) / entry * 100
-            pnl_usd = pnl_pct / 100 * self.amount * self.leverage
+            pnl_usd = pnl_pct / 100 * self.amount
             total_pnl += pnl_usd
             held = self._format_elapsed(now - pos.get("entry_unix", now))
 
@@ -362,7 +363,7 @@ class MomentumPaperTrader:
         for pos in self.positions.values():
             price = pos.get("current_price", pos["entry_price"])
             pnl_pct = (price - pos["entry_price"]) / pos["entry_price"] * 100
-            unrealized += pnl_pct / 100 * self.amount * self.leverage
+            unrealized += pnl_pct / 100 * self.amount
 
         elapsed = time.time() - self.start_time
         mins = int(elapsed / 60)
@@ -403,7 +404,7 @@ class MomentumPaperTrader:
             price = pos.get("current_price", pos["entry_price"])
             entry = pos["entry_price"]
             pnl_pct = (price - entry) / entry * 100
-            pnl_usd = pnl_pct / 100 * self.amount * self.leverage
+            pnl_usd = pnl_pct / 100 * self.amount
             total_pnl += pnl_usd
             if pnl_usd >= 0:
                 wins += 1
