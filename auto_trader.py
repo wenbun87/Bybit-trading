@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-Bybit Momentum Auto-Trader
+Bybit Accumulation Auto-Trader
 
-Runs the momentum scanner on a schedule, opens long positions on high-scoring
-coins with no stop loss (ride-or-die strategy based on backtest results).
+Scans for quiet, low-turnover coins showing early accumulation signals
+(volume ramp, OI building, price coiling) and enters BEFORE the pump.
 
-  Entry:  Momentum score 60+ → market buy perp (no stops)
-  Exit:   Manual — close when you want
+  Entry:  Pool D coins only (quiet accumulation phase) with score 60+
+  Exit:   Automatic — when coin graduates to Pool A/B (crowd arrives),
+          funding flips positive, OI drops, or 200%+ extension
 
 DRY-RUN MODE (default):
   Paper trades tracked with live P&L updates every scan cycle.
   Full P&L summary on Ctrl+C.
 
 LIVE MODE:
-  Real orders placed. Open position P&L shown every scan cycle.
+  Real orders placed. Exit signals checked every scan cycle.
 
 SAFETY FEATURES:
   - Starts in DRY-RUN mode by default (no real trades until you pass --live)
+  - Only enters Pool D (quiet) coins — never chases pumps
+  - Automatic exit when coin hits mainstream radar
   - Max trades per cycle and per day
   - 6h re-entry cooldown per symbol
   - Max total exposure cap
@@ -28,7 +31,7 @@ REQUIRES:
 
 Usage:
     python3 auto_trader.py                    # dry-run with paper P&L tracking
-    python3 auto_trader.py --live             # REAL TRADES on mainnet (no stops)
+    python3 auto_trader.py --live             # REAL TRADES on mainnet
     python3 auto_trader.py --live --amount 250  # $250 per trade
     python3 auto_trader.py --min-score 70     # trigger on score 70+
 """
@@ -49,7 +52,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Import the scanner
-from momentum_scanner import run_scan, fetch_all_linear_tickers, MAINNET_URL, TESTNET_URL
+from momentum_scanner import (run_scan, fetch_all_linear_tickers, check_exit_signals,
+                              MAINNET_URL, TESTNET_URL)
 
 # ──────────────────────────────────────────────
 # Config
@@ -66,7 +70,6 @@ MAX_TRADES_PER_CYCLE = 2        # max trades per scan cycle
 MAX_TRADES_PER_DAY = 6          # max trades in 24 hours
 MAX_TOTAL_EXPOSURE_USDT = 3000  # stop opening if total exceeds this
 DEFAULT_LEVERAGE = 10           # 10x leverage
-MIN_VOLUME_24H = 5_000_000      # only trade coins with >$5M 24h volume
 RE_ENTRY_COOLDOWN_HOURS = 6     # allow re-entry on same symbol after this cooldown
 
 TRADE_LOG_FILE = "trade_log.csv"
@@ -278,7 +281,7 @@ def log_trade(symbol: str, side: str, qty: str, price: float,
 # ──────────────────────────────────────────────
 
 class MomentumPaperTrader:
-    """Tracks hypothetical momentum trades during dry-run / scan-only mode."""
+    """Tracks hypothetical accumulation trades during dry-run / scan-only mode."""
 
     def __init__(self, amount_usdt, leverage):
         self.amount = amount_usdt
@@ -290,7 +293,6 @@ class MomentumPaperTrader:
     def enter(self, symbol, price, score, signals):
         if symbol in self.positions:
             return
-        # Match live mode: amount = total notional (position size), not margin × leverage
         qty = self.amount / price
         self.positions[symbol] = {
             "entry_price": price,
@@ -301,6 +303,26 @@ class MomentumPaperTrader:
         }
         print(f"  [PAPER] LONG {symbol} @ {price:,.6g} | "
               f"Score {score:.0f} | ${self.amount} x{self.leverage}")
+
+    def exit(self, symbol, current_price, reason):
+        if symbol not in self.positions:
+            return
+        pos = self.positions.pop(symbol)
+        entry = pos["entry_price"]
+        pnl_pct = (current_price - entry) / entry * 100
+        pnl_usd = pnl_pct / 100 * self.amount
+        held = self._format_elapsed(time.time() - pos.get("entry_unix", time.time()))
+        self.closed_trades.append({
+            **pos,
+            "exit_price": current_price,
+            "exit_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "pnl_pct": pnl_pct,
+            "pnl_usd": pnl_usd,
+            "reason": reason,
+            "symbol": symbol,
+        })
+        print(f"  [PAPER EXIT] {symbol} @ {current_price:,.6g} | "
+              f"P&L: {pnl_pct:+.1f}% (${pnl_usd:+,.2f}) | Held: {held} | {reason}")
 
     def update_prices(self, base_url):
         """Fetch latest prices for all open paper positions."""
@@ -379,50 +401,71 @@ class MomentumPaperTrader:
         hours = elapsed / 3600
         mins = (elapsed % 3600) / 60
 
-        print(f"\n{'='*90}")
+        print(f"\n{'='*120}")
         print(f"  PAPER TRADING SUMMARY")
         print(f"  Session: {int(hours)}h {int(mins)}m | "
-              f"${self.amount} per trade @ {self.leverage}x leverage | No stops")
-        print(f"{'='*90}")
+              f"${self.amount} per trade @ {self.leverage}x leverage | Pool D accumulation strategy")
+        print(f"{'='*120}")
 
-        if not self.positions:
-            print(f"\n  No paper trades were opened during this session.")
-            print(f"{'='*90}\n")
-            return
-
-        print(f"\n  ALL POSITIONS ({len(self.positions)}):")
-        print(f"  {'─'*115}")
-        print(f"  {'Symbol':<14} {'Score':>6} {'Entry':>12} {'Current':>12}"
-              f"  {'P&L%':>8}  {'P&L$':>10}  {'Entered':<22}  {'Held':>6}")
-        print(f"  {'─'*115}")
-
+        all_trades = list(self.closed_trades)
         total_pnl = 0
         wins = 0
         losses = 0
-        now = time.time()
-        for symbol, pos in sorted(self.positions.items(), key=lambda x: x[1].get("current_price", x[1]["entry_price"]) / x[1]["entry_price"] - 1, reverse=True):
-            price = pos.get("current_price", pos["entry_price"])
-            entry = pos["entry_price"]
-            pnl_pct = (price - entry) / entry * 100
-            pnl_usd = pnl_pct / 100 * self.amount
-            total_pnl += pnl_usd
-            if pnl_usd >= 0:
-                wins += 1
-            else:
-                losses += 1
-            held = self._format_elapsed(now - pos.get("entry_unix", now))
 
-            print(f"  {symbol:<14} {pos['score']:>6.0f} {entry:>12,.6g} {price:>12,.6g}"
-                  f"  {pnl_pct:>+7.1f}%  ${pnl_usd:>+9,.2f}  {pos['entry_time']:<22}  {held:>6}")
+        if self.closed_trades:
+            print(f"\n  CLOSED TRADES ({len(self.closed_trades)}):")
+            print(f"  {'─'*130}")
+            print(f"  {'Symbol':<14} {'Score':>6} {'Entry':>12} {'Exit':>12}"
+                  f"  {'P&L%':>8}  {'P&L$':>10}  {'Held':>6}  {'Exit Reason':<40}")
+            print(f"  {'─'*130}")
+            for t in self.closed_trades:
+                held = self._format_elapsed(
+                    (datetime.strptime(t["exit_time"], "%Y-%m-%d %H:%M:%S %Z").replace(tzinfo=timezone.utc)
+                     - datetime.strptime(t["entry_time"], "%Y-%m-%d %H:%M:%S %Z").replace(tzinfo=timezone.utc)
+                    ).total_seconds()) if "exit_time" in t else "?"
+                total_pnl += t["pnl_usd"]
+                if t["pnl_usd"] >= 0:
+                    wins += 1
+                else:
+                    losses += 1
+                print(f"  {t['symbol']:<14} {t['score']:>6.0f} {t['entry_price']:>12,.6g} {t['exit_price']:>12,.6g}"
+                      f"  {t['pnl_pct']:>+7.1f}%  ${t['pnl_usd']:>+9,.2f}  {held:>6}  {t['reason']:<40}")
 
-        print(f"  {'─'*85}")
-        total_trades = len(self.positions)
-        print(f"\n  RESULTS:")
-        print(f"    Total trades:  {total_trades}")
-        print(f"    Winning:       {wins} ({wins/total_trades*100:.0f}%)")
-        print(f"    Losing:        {losses} ({losses/total_trades*100:.0f}%)")
+        if self.positions:
+            print(f"\n  OPEN POSITIONS ({len(self.positions)}):")
+            print(f"  {'─'*115}")
+            print(f"  {'Symbol':<14} {'Score':>6} {'Entry':>12} {'Current':>12}"
+                  f"  {'P&L%':>8}  {'P&L$':>10}  {'Entered':<22}  {'Held':>6}")
+            print(f"  {'─'*115}")
+
+            now = time.time()
+            for symbol, pos in sorted(self.positions.items(), key=lambda x: x[1].get("current_price", x[1]["entry_price"]) / x[1]["entry_price"] - 1, reverse=True):
+                price = pos.get("current_price", pos["entry_price"])
+                entry = pos["entry_price"]
+                pnl_pct = (price - entry) / entry * 100
+                pnl_usd = pnl_pct / 100 * self.amount
+                total_pnl += pnl_usd
+                if pnl_usd >= 0:
+                    wins += 1
+                else:
+                    losses += 1
+                held = self._format_elapsed(now - pos.get("entry_unix", now))
+                print(f"  {symbol:<14} {pos['score']:>6.0f} {entry:>12,.6g} {price:>12,.6g}"
+                      f"  {pnl_pct:>+7.1f}%  ${pnl_usd:>+9,.2f}  {pos['entry_time']:<22}  {held:>6}")
+
+        if not self.positions and not self.closed_trades:
+            print(f"\n  No paper trades were opened during this session.")
+            print(f"{'='*120}\n")
+            return
+
+        total_trades = len(self.positions) + len(self.closed_trades)
+        print(f"\n  {'─'*60}")
+        print(f"  RESULTS:")
+        print(f"    Total trades:  {total_trades} ({len(self.closed_trades)} closed, {len(self.positions)} open)")
+        print(f"    Winning:       {wins} ({wins/total_trades*100:.0f}%)" if total_trades else "")
+        print(f"    Losing:        {losses} ({losses/total_trades*100:.0f}%)" if total_trades else "")
         print(f"\n    TOTAL P&L:     ${total_pnl:+,.2f}")
-        print(f"{'='*90}\n")
+        print(f"{'='*120}\n")
 
 
 # ──────────────────────────────────────────────
@@ -539,13 +582,14 @@ def run_auto_trader(args):
     print(f"{'='*70}")
     print(f"  Trade amount:    ${args.amount} USDT per trade")
     print(f"  Leverage:        {args.leverage}x")
-    print(f"  Strategy:        No stops (ride or die)")
+    print(f"  Strategy:        Pool D accumulation → exit on graduation")
+    print(f"  Entry:           Pool D only (quiet coins, accumulation phase)")
+    print(f"  Exit:            Pool A/B graduation, funding flip, OI drop, 200%+ extension")
     print(f"  Min score:       {args.min_score} (trigger threshold)")
     print(f"  Scan interval:   every {args.interval} minutes")
     print(f"  Max per cycle:   {MAX_TRADES_PER_CYCLE} trades")
     print(f"  Max per day:     {MAX_TRADES_PER_DAY} trades")
     print(f"  Max exposure:    ${MAX_TOTAL_EXPOSURE_USDT:,}")
-    print(f"  Min 24h volume:  ${MIN_VOLUME_24H/1e6:.0f}M (filters micro-caps)")
     print(f"  Re-entry after:  {RE_ENTRY_COOLDOWN_HOURS}h cooldown")
     print(f"  Trade log:       {TRADE_LOG_FILE}")
 
@@ -554,7 +598,7 @@ def run_auto_trader(args):
         print(f"  >>> Add --live flag to enable real trading <<<")
         print(f"  >>> P&L summary shown after each scan. Ctrl+C for final summary <<<")
     else:
-        print(f"\n  >>> LIVE MODE — REAL ORDERS WILL BE PLACED (no stops) <<<")
+        print(f"\n  >>> LIVE MODE — REAL ORDERS WILL BE PLACED <<<")
         print(f"  >>> Trading ${args.amount} per signal on {env_label} <<<")
 
     # Verify connection
@@ -576,128 +620,192 @@ def run_auto_trader(args):
         now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
         print(f"\n--- Cycle {cycle} | {now} | {mode} ---\n")
 
-        # Run momentum scan
+        # ── EXIT CHECK: check open positions for graduation/exit signals ──
+        open_symbols = list(paper.positions.keys()) if paper else []
+        if not paper and args.live:
+            live_positions = get_open_positions(base_url, api_key, api_secret)
+            open_symbols = [p.get("symbol", "") for p in live_positions
+                           if float(p.get("size", 0)) > 0]
+
+        if open_symbols:
+            print(f"  Checking exit signals for {len(open_symbols)} open position(s)...\n")
+            for sym in open_symbols:
+                if paper and sym in paper.positions:
+                    entry_price = paper.positions[sym]["entry_price"]
+                else:
+                    entry_price = 0
+                    if args.live:
+                        for p in live_positions:
+                            if p.get("symbol") == sym:
+                                entry_price = float(p.get("avgPrice", "0") or "0")
+                                break
+
+                if entry_price <= 0:
+                    continue
+
+                exit_info = check_exit_signals(base_url, sym, entry_price)
+                pool_now = exit_info.get("pool", "?")
+                pnl = exit_info.get("pnl_pct", 0)
+
+                if exit_info["exit"]:
+                    print(f"  EXIT SIGNAL: {sym} (Pool {pool_now}, {pnl:+.1f}%)")
+                    print(f"    Reason: {exit_info['reason']}")
+
+                    if paper:
+                        paper.exit(sym, exit_info["current_price"], exit_info["reason"])
+                    elif args.live:
+                        # Close live position
+                        for p in live_positions:
+                            if p.get("symbol") == sym:
+                                size = p.get("size", "0")
+                                pos_idx = int(p.get("positionIdx", 0))
+                                print(f"    Closing {size} {sym}...", end=" ")
+                                close_params = {
+                                    "category": "linear", "symbol": sym,
+                                    "side": "Sell", "orderType": "Market",
+                                    "qty": size, "positionIdx": pos_idx,
+                                    "reduceOnly": True,
+                                }
+                                result = api_request(base_url, "POST", "/v5/order/create",
+                                                     api_key, api_secret, close_params)
+                                if result.get("retCode") == 0:
+                                    print(f"CLOSED")
+                                    log_trade(sym, "Sell", size, exit_info["current_price"],
+                                              float(size) * exit_info["current_price"],
+                                              args.leverage, 0, {}, "exit",
+                                              result.get("result", {}).get("orderId", "N/A"), "live")
+                                else:
+                                    print(f"FAILED: {result.get('retMsg')}")
+                                break
+                else:
+                    sig_count = len(exit_info.get("signals", []))
+                    if sig_count > 0:
+                        print(f"  WATCH: {sym} (Pool {pool_now}, {pnl:+.1f}%) — {sig_count} early signal(s): {exit_info['reason']}")
+                    else:
+                        print(f"  HOLD:  {sym} (Pool {pool_now}, {pnl:+.1f}%) — no exit signals")
+            print()
+
+        # ── ENTRY SCAN: find new Pool D accumulation candidates ──
         results = run_scan(base_url, top_n=20, min_score=args.min_score)
 
         if not results:
             print(f"\n  No coins above score {args.min_score}. Waiting...\n")
         else:
-            # Filter to extreme signals only
-            extreme = [r for r in results if r["momentum_score"] >= args.min_score]
-            print(f"\n  {len(extreme)} coin(s) above threshold ({args.min_score}):\n")
+            # Only enter Pool D coins (quiet accumulation phase)
+            pool_d_results = [r for r in results if r.get("pool") == "D"
+                              and r["momentum_score"] >= args.min_score]
+            other_results = [r for r in results if r.get("pool") != "D"
+                             and r["momentum_score"] >= args.min_score]
 
-            trades_this_cycle = 0
-            for r in extreme:
-                if trades_this_cycle >= MAX_TRADES_PER_CYCLE:
-                    print(f"  Max trades per cycle reached ({MAX_TRADES_PER_CYCLE}). Skipping rest.")
-                    break
+            if other_results:
+                print(f"\n  {len(other_results)} coin(s) in Pool A/B/C (watch only, not trading):")
+                for r in other_results[:5]:
+                    print(f"    {r['pool']} {r['symbol']:<14} Score: {r['momentum_score']:.0f} | "
+                          f"24h: {r['change24h']:+.1f}% | Vol: ${r['turnover24h']/1e6:,.1f}M")
 
-                symbol = r["symbol"]
-                score = r["momentum_score"]
-                price = r["lastPrice"]
-                signals = r["signals"]
+            if not pool_d_results:
+                print(f"\n  No Pool D accumulation candidates above threshold. Waiting...\n")
+            else:
+                print(f"\n  {len(pool_d_results)} Pool D accumulation candidate(s):\n")
 
-                turnover = r.get("turnover24h", 0)
-                print(f"  >> {symbol} | Score: {score} | Price: ${price:,.6g} | 24h: {r['change24h']:+.1f}% | Vol: ${turnover/1e6:,.1f}M")
-                print(f"     Vol: {signals['volume_anomaly']['detail']}")
-                print(f"     OI:  {signals['oi_surge']['detail']}")
-                sqz = signals.get("squeeze_setup", {})
-                pre = signals.get("pre_squeeze", {})
-                dist = signals.get("distribution_risk", {})
-                crime = signals.get("crime_pump", {})
-                acc = signals.get("accumulation", {})
-                if acc.get("score", 0) > 0:
-                    print(f"     ACCUMULATION:  {acc['detail']} (score {acc['score']}, phase: {acc.get('phase', '?')})")
-                if pre.get("score", 0) > 0:
-                    phase = pre.get("phase", "?")
-                    print(f"     PRE-SQUEEZE:   {pre['detail']} (score {pre['score']}, phase: {phase})")
-                if sqz.get("score", 0) > 0:
-                    print(f"     Squeeze setup: {sqz['detail']} (score {sqz['score']})")
-                if dist.get("penalty", 0) > 0:
-                    print(f"     Dist penalty:  -{dist['penalty']} pts | {dist['detail']}")
-                if crime.get("crime_score", 0) > 0:
-                    print(f"     Crime risk:    {crime['detail']} (score {crime['crime_score']})")
+                trades_this_cycle = 0
+                for r in pool_d_results:
+                    if trades_this_cycle >= MAX_TRADES_PER_CYCLE:
+                        print(f"  Max trades per cycle reached ({MAX_TRADES_PER_CYCLE}). Skipping rest.")
+                        break
 
-                # Volume filter: skip coins with < $20M 24h volume
-                if turnover < MIN_VOLUME_24H:
-                    print(f"     SKIP: 24h volume ${turnover/1e6:,.1f}M < ${MIN_VOLUME_24H/1e6:.0f}M minimum")
-                    continue
+                    symbol = r["symbol"]
+                    score = r["momentum_score"]
+                    price = r["lastPrice"]
+                    signals = r["signals"]
 
-                # Safety checks
-                can_trade, reason = session.can_trade(symbol)
-                if not can_trade:
-                    print(f"     SKIP: {reason}")
-                    continue
+                    turnover = r.get("turnover24h", 0)
+                    print(f"  >> {symbol} [Pool D] | Score: {score} | Price: ${price:,.6g} | 24h: {r['change24h']:+.1f}% | Vol: ${turnover/1e6:,.1f}M")
+                    acc = signals.get("accumulation", {})
+                    if acc.get("score", 0) > 0:
+                        print(f"     ACCUMULATION:  {acc['detail']} (score {acc['score']}, phase: {acc.get('phase', '?')})")
+                    print(f"     Vol: {signals['volume_anomaly']['detail']}")
+                    print(f"     OI:  {signals['oi_surge']['detail']}")
+                    pre = signals.get("pre_squeeze", {})
+                    if pre.get("score", 0) > 0:
+                        print(f"     PRE-SQUEEZE:   {pre['detail']} (score {pre['score']}, phase: {pre.get('phase', '?')})")
+                    crime = signals.get("crime_pump", {})
+                    if crime.get("crime_score", 0) > 0:
+                        print(f"     Crime risk:    {crime['detail']} (score {crime['crime_score']})")
 
-                # Get instrument info for qty precision
-                instrument = get_instrument_info(base_url, symbol)
-                if not instrument:
-                    print(f"     SKIP: could not fetch instrument info")
-                    continue
+                    # Safety checks
+                    can_trade, reason = session.can_trade(symbol)
+                    if not can_trade:
+                        print(f"     SKIP: {reason}")
+                        continue
 
-                qty = calculate_qty(args.amount, price, instrument)
-                if not qty:
-                    print(f"     SKIP: qty too small for ${args.amount} at ${price}")
-                    continue
+                    # Get instrument info for qty precision
+                    instrument = get_instrument_info(base_url, symbol)
+                    if not instrument:
+                        print(f"     SKIP: could not fetch instrument info")
+                        continue
 
-                est_value = float(qty) * price
-                print(f"     Order: BUY {qty} {symbol} (~${est_value:,.2f}) @ {args.leverage}x leverage (no stops)")
+                    qty = calculate_qty(args.amount, price, instrument)
+                    if not qty:
+                        print(f"     SKIP: qty too small for ${args.amount} at ${price}")
+                        continue
 
-                if not args.live:
-                    # Dry run — track as paper trade
-                    print(f"     [DRY-RUN] Would place order (no stops)")
-                    log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
-                              score, signals, "dry-run", "N/A", "dry-run")
-                    if paper:
-                        paper.enter(symbol, price, score, signals)
-                    session.record_trade(symbol, est_value)
-                    trades_this_cycle += 1
-                else:
-                    # LIVE: set leverage then place order (no stop loss)
-                    print(f"     Setting leverage to {args.leverage}x...", end=" ")
-                    lev_ok = set_leverage(base_url, api_key, api_secret, symbol, args.leverage)
-                    print("OK" if lev_ok else "WARN (may already be set)")
+                    est_value = float(qty) * price
+                    print(f"     Order: BUY {qty} {symbol} (~${est_value:,.2f}) @ {args.leverage}x leverage")
 
-                    time.sleep(0.3)
-                    print(f"     Placing market order (no stops)...", end=" ")
-                    result = place_market_order(base_url, api_key, api_secret, symbol, qty)
-                    ret_code = result.get("retCode", -1)
-                    order_id = result.get("result", {}).get("orderId", "N/A")
-
-                    if ret_code == 0:
-                        print(f"FILLED (orderId: {order_id})")
+                    if not args.live:
+                        print(f"     [DRY-RUN] Would place order")
                         log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
-                                  score, signals, "filled", order_id, "live")
+                                  score, signals, "dry-run", "N/A", "dry-run")
+                        if paper:
+                            paper.enter(symbol, price, score, signals)
                         session.record_trade(symbol, est_value)
                         trades_this_cycle += 1
-                    elif ret_code == 10001 and "position idx" in result.get("retMsg", "").lower():
-                        print(f"hedge mode detected, retrying...", end=" ")
+                    else:
+                        print(f"     Setting leverage to {args.leverage}x...", end=" ")
+                        lev_ok = set_leverage(base_url, api_key, api_secret, symbol, args.leverage)
+                        print("OK" if lev_ok else "WARN (may already be set)")
+
                         time.sleep(0.3)
-                        order_link_id = f"momentum_{symbol}_{int(time.time())}"
-                        hedge_params = {
-                            "category": "linear", "symbol": symbol,
-                            "side": "Buy", "orderType": "Market", "qty": qty,
-                            "orderLinkId": order_link_id, "positionIdx": 1,
-                        }
-                        result2 = api_request(base_url, "POST", "/v5/order/create",
-                                              api_key, api_secret, hedge_params)
-                        if result2.get("retCode") == 0:
-                            oid = result2.get("result", {}).get("orderId", "N/A")
-                            print(f"FILLED (orderId: {oid})")
+                        print(f"     Placing market order...", end=" ")
+                        result = place_market_order(base_url, api_key, api_secret, symbol, qty)
+                        ret_code = result.get("retCode", -1)
+                        order_id = result.get("result", {}).get("orderId", "N/A")
+
+                        if ret_code == 0:
+                            print(f"FILLED (orderId: {order_id})")
                             log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
-                                      score, signals, "filled", oid, "live")
+                                      score, signals, "filled", order_id, "live")
                             session.record_trade(symbol, est_value)
                             trades_this_cycle += 1
+                        elif ret_code == 10001 and "position idx" in result.get("retMsg", "").lower():
+                            print(f"hedge mode detected, retrying...", end=" ")
+                            time.sleep(0.3)
+                            order_link_id = f"momentum_{symbol}_{int(time.time())}"
+                            hedge_params = {
+                                "category": "linear", "symbol": symbol,
+                                "side": "Buy", "orderType": "Market", "qty": qty,
+                                "orderLinkId": order_link_id, "positionIdx": 1,
+                            }
+                            result2 = api_request(base_url, "POST", "/v5/order/create",
+                                                  api_key, api_secret, hedge_params)
+                            if result2.get("retCode") == 0:
+                                oid = result2.get("result", {}).get("orderId", "N/A")
+                                print(f"FILLED (orderId: {oid})")
+                                log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
+                                          score, signals, "filled", oid, "live")
+                                session.record_trade(symbol, est_value)
+                                trades_this_cycle += 1
+                            else:
+                                print(f"FAILED: {result2.get('retMsg')}")
+                                log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
+                                          score, signals, "failed", "N/A", "live")
                         else:
-                            print(f"FAILED: {result2.get('retMsg')}")
+                            print(f"FAILED: {result.get('retMsg')}")
                             log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                                       score, signals, "failed", "N/A", "live")
-                    else:
-                        print(f"FAILED: {result.get('retMsg')}")
-                        log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
-                                  score, signals, "failed", "N/A", "live")
 
-                print()
+                    print()
 
         # P&L display
         if paper:

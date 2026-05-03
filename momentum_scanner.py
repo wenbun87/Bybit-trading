@@ -1010,6 +1010,125 @@ def compute_momentum_score(signals: dict) -> float:
     return round(final, 1)
 
 
+def check_exit_signals(base_url: str, symbol: str, entry_price: float) -> dict:
+    """
+    Check whether an open position should be exited.
+
+    Exit signals (graduated from accumulation to mainstream):
+      1. Coin now in Pool A/B — it's on everyone's radar, crowd has arrived
+      2. Funding flipped positive — shorts capitulated, squeeze fuel gone
+      3. OI dropping while price up — smart money unwinding
+      4. Price up 200%+ from entry — extreme extension, take profit
+      5. Crime pump detected — coin has entered manipulation territory
+
+    Returns: {"exit": bool, "reason": str, "signals": list[str], "pool": str}
+    """
+    # Get current ticker to check pool membership
+    tickers = fetch_all_linear_tickers(base_url)
+    ticker = None
+    all_sorted = []
+    for t in tickers:
+        try:
+            sym = t["symbol"]
+            if not sym.endswith("USDT"):
+                continue
+            turnover = float(t.get("turnover24h", 0))
+            change = float(t.get("price24hPcnt", 0)) * 100
+            price = float(t.get("lastPrice", 0))
+            if price <= 0:
+                continue
+            all_sorted.append({"symbol": sym, "turnover": turnover, "change": change, "price": price})
+            if sym == symbol:
+                ticker = {"turnover": turnover, "change": change, "price": price}
+        except (ValueError, TypeError, KeyError):
+            continue
+
+    if not ticker:
+        return {"exit": False, "reason": "ticker not found", "signals": [], "pool": "?"}
+
+    exit_signals = []
+    current_price = ticker["price"]
+    pnl_pct = (current_price - entry_price) / entry_price * 100
+
+    # Determine current pool membership
+    all_sorted.sort(key=lambda x: x["turnover"], reverse=True)
+    top_50_syms = {c["symbol"] for c in all_sorted[:50]}
+
+    movers = [c for c in all_sorted if c["symbol"] not in top_50_syms
+              and c["turnover"] >= 1_000_000 and c["change"] >= 1.0]
+    movers.sort(key=lambda x: x["change"], reverse=True)
+    top_movers_syms = {c["symbol"] for c in movers[:30]}
+
+    if symbol in top_50_syms:
+        current_pool = "A"
+    elif symbol in top_movers_syms:
+        current_pool = "B"
+    else:
+        current_pool = "D"
+
+    # Exit signal 1: graduated to Pool A or B
+    if current_pool in ("A", "B"):
+        pool_name = "top volume" if current_pool == "A" else "top gainers"
+        exit_signals.append(f"graduated to Pool {current_pool} ({pool_name}) — crowd arrived")
+
+    # Fetch derivatives data for the coin
+    funding_data = fetch_funding_history(base_url, symbol)
+    oi_data = fetch_open_interest(base_url, symbol)
+    klines = fetch_klines(base_url, symbol, interval="60", limit=12)
+
+    # Exit signal 2: funding flipped positive (squeeze fuel exhausted)
+    if funding_data and len(funding_data) >= 2:
+        try:
+            recent_rates = [float(f.get("fundingRate", 0)) * 100 for f in funding_data[:4]]
+            positive_count = sum(1 for r in recent_rates if r > 0)
+            avg_funding = sum(recent_rates) / len(recent_rates)
+            if positive_count >= 3 or avg_funding > 0.03:
+                exit_signals.append(f"funding positive {positive_count}/{len(recent_rates)}c (avg {avg_funding:+.4f}%) — shorts gone")
+        except (ValueError, TypeError):
+            pass
+
+    # Exit signal 3: OI dropping while price is up (smart money exiting)
+    if oi_data and len(oi_data) >= 6 and pnl_pct > 10:
+        try:
+            recent_oi = float(oi_data[0].get("openInterest", 0))
+            older_oi = float(oi_data[-1].get("openInterest", 0))
+            if older_oi > 0:
+                oi_change = (recent_oi - older_oi) / older_oi * 100
+                if oi_change < -10:
+                    exit_signals.append(f"OI dropping {oi_change:+.1f}% while up {pnl_pct:+.0f}% — distribution")
+        except (ValueError, TypeError):
+            pass
+
+    # Exit signal 4: extreme extension from entry
+    if pnl_pct >= 200:
+        exit_signals.append(f"up {pnl_pct:+.0f}% from entry — extreme extension")
+    elif pnl_pct >= 100:
+        exit_signals.append(f"up {pnl_pct:+.0f}% from entry — extended")
+
+    # Exit signal 5: crime pump detected on this coin
+    if klines and funding_data and oi_data:
+        daily_klines = fetch_daily_klines(base_url, symbol, limit=14)
+        crime = analyze_crime_pump_risk(klines, oi_data, funding_data,
+                                        ticker["turnover"], daily_klines)
+        if crime["blocked"]:
+            exit_signals.append(f"crime pump detected: {crime['detail']}")
+
+    # Decision: exit if 2+ signals fire, or if any strong signal fires
+    strong_signals = [s for s in exit_signals if "graduated" in s or "crime pump" in s or "extreme extension" in s]
+    should_exit = len(exit_signals) >= 2 or len(strong_signals) >= 1
+
+    reason = " | ".join(exit_signals) if exit_signals else "no exit signals"
+
+    return {
+        "exit": should_exit,
+        "reason": reason,
+        "signals": exit_signals,
+        "pool": current_pool,
+        "pnl_pct": round(pnl_pct, 2),
+        "current_price": current_price,
+    }
+
+
 # ──────────────────────────────────────────────
 # Main scanner
 # ──────────────────────────────────────────────
@@ -1096,6 +1215,17 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
 
     scan_pool = pool_a + pool_b + pool_c + pool_d
 
+    # Tag each candidate with its pool for entry/exit logic
+    pool_tags = {}
+    for c in pool_a:
+        pool_tags[c["symbol"]] = "A"
+    for c in pool_b:
+        pool_tags[c["symbol"]] = "B"
+    for c in pool_c:
+        pool_tags[c["symbol"]] = "C"
+    for c in pool_d:
+        pool_tags[c["symbol"]] = "D"
+
     print(f"  {len(tickers)} perps found → {len(candidates)} candidates after filters")
     print(f"  Scan pool: {len(pool_a)} volume + {len(pool_b)} movers + {len(pool_c)} flat + {len(pool_d)} quiet (accumulation) = {len(scan_pool)} coins")
     print()
@@ -1140,6 +1270,7 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
                 **c,
                 "momentum_score": momentum_score,
                 "signals": signals,
+                "pool": pool_tags.get(symbol, "?"),
             })
 
     print(f"\r  Scanning complete. {_call_count} API calls made.{' ' * 40}")
@@ -1177,11 +1308,11 @@ def display_results(results: list[dict], env_label: str):
 
     # Header
     print(
-        f"{'#':>3}  {'Symbol':<14} {'Price':>12} {'24h%':>8} {'Score':>6} {'Alert':<12}"
+        f"{'#':>3} {'P':>1}  {'Symbol':<14} {'Price':>12} {'24h%':>8} {'Score':>6} {'Alert':<12}"
         f"  {'Accum':>5} {'Vol':>5} {'OI':>5} {'Sqz':>5} {'PreSq':>5} {'PrAc':>5} {'Strk':>5} {'Pen':>5} {'Crime':>5}"
         f"  {'Phase':<14}  {'Key Signal':<30}"
     )
-    print("-" * 175)
+    print("-" * 178)
 
     for i, r in enumerate(results, 1):
         s = r["signals"]
@@ -1220,8 +1351,9 @@ def display_results(results: list[dict], env_label: str):
 
         alert = format_alert_level(r["momentum_score"])
 
+        pool = r.get("pool", "?")
         print(
-            f"{i:>3}  {r['symbol']:<14} {r['lastPrice']:>12,.6g} {r['change24h']:>+7.1f}% {r['momentum_score']:>5.1f} {alert:<12}"
+            f"{i:>3} {pool:>1}  {r['symbol']:<14} {r['lastPrice']:>12,.6g} {r['change24h']:>+7.1f}% {r['momentum_score']:>5.1f} {alert:<12}"
             f"  {acc_s:>5.0f} {vol_s:>5.0f} {oi_s:>5.0f} {sq_s:>5.0f} {ps_s:>5.0f} {pa_s:>5.0f} {st_s:>5.0f} {-pen:>5.0f} {crime:>5.0f}"
             f"  {phase:<14}  {key_signal:<30}"
         )
