@@ -46,11 +46,12 @@ MIN_CALL_INTERVAL_POST = 0.32  # 320ms between POST requests
 
 # Scoring weights (sum = 1.0)
 WEIGHTS = {
-    "volume_anomaly": 0.25,
-    "price_accel":    0.20,
-    "oi_surge":       0.20,
-    "squeeze_setup":  0.20,   # negative funding + rising OI + rising price
-    "streak":         0.15,
+    "volume_anomaly": 0.20,
+    "price_accel":    0.15,
+    "oi_surge":       0.15,
+    "squeeze_setup":  0.15,   # negative funding + rising OI + rising price (now)
+    "pre_squeeze":    0.25,   # MYX-style trap pattern (sustained setup) — biggest weight
+    "streak":         0.10,
 }
 
 # Distribution risk caps the penalty at -30 points
@@ -533,6 +534,122 @@ def analyze_distribution_risk(klines: list[list], oi_data: list[dict]) -> dict:
 CRIME_PUMP_BLOCK_THRESHOLD = 60
 
 
+def analyze_pre_squeeze_setup(funding_data: list[dict], klines: list[list],
+                              oi_data: list[dict]) -> dict:
+    """
+    Detect MYX-style pre-squeeze SETUP — the trap before the rip.
+
+    The MYX pattern (the goldmine entry):
+      Phase 2: Initial bait pump (already happened)
+      Phase 3: Consolidation with sustained negative funding (TRAP being set)
+      Phase 4: Explosive squeeze (THE RIP — what we want to ride)
+
+    Detects Phase 3 by requiring ALL of:
+      - Funding has been negative for last 3+ cycles (sustained, not just spike)
+      - Price is consolidating (tight range relative to recent move)
+      - OI rising during consolidation (shorts piling in)
+      - Had a recent pump (24h-7d ago) that's now ranging (the bait already happened)
+
+    Score 0-100. Higher = stronger setup, riper for explosive squeeze.
+    """
+    if len(funding_data) < 4 or len(klines) < 24 or len(oi_data) < 6:
+        return {"score": 0, "detail": "insufficient data", "phase": "unknown"}
+
+    try:
+        funding_rates = [float(f.get("fundingRate", 0)) * 100 for f in funding_data[:8]]
+        closes = [float(k[4]) for k in klines]
+        highs = [float(k[2]) for k in klines]
+        lows = [float(k[3]) for k in klines]
+        recent_oi = float(oi_data[0].get("openInterest", 0))
+        oldest_oi = float(oi_data[-1].get("openInterest", 0))
+    except (ValueError, TypeError):
+        return {"score": 0, "detail": "parse error", "phase": "unknown"}
+
+    if oldest_oi <= 0:
+        return {"score": 0, "detail": "no OI baseline", "phase": "unknown"}
+
+    current = closes[-1]
+
+    # Signal 1: Sustained negative funding (multiple cycles)
+    negative_cycles = sum(1 for f in funding_rates if f < 0)
+    avg_funding = sum(funding_rates) / len(funding_rates)
+    sustained_neg_score = 0
+    if negative_cycles >= 6:
+        sustained_neg_score = 35
+    elif negative_cycles >= 4:
+        sustained_neg_score = 25
+    elif negative_cycles >= 3:
+        sustained_neg_score = 15
+
+    # Signal 2: Price consolidation — tight range over last 24 bars
+    last_24h_range = max(closes[-24:]) - min(closes[-24:])
+    last_24h_avg = sum(closes[-24:]) / 24
+    consol_pct = (last_24h_range / last_24h_avg * 100) if last_24h_avg > 0 else 0
+    consol_score = 0
+    if consol_pct < 8:
+        consol_score = 25  # very tight range
+    elif consol_pct < 15:
+        consol_score = 15  # moderately tight
+    elif consol_pct < 25:
+        consol_score = 5
+
+    # Signal 3: OI rising during consolidation (shorts stacking)
+    oi_change = (recent_oi - oldest_oi) / oldest_oi * 100
+    oi_score = 0
+    if oi_change > 15:
+        oi_score = 25
+    elif oi_change > 5:
+        oi_score = 15
+    elif oi_change > 0:
+        oi_score = 5
+
+    # Signal 4: Had a recent bait pump (price is well above the 48h low)
+    high_48h = max(highs)
+    low_48h = min(lows)
+    pump_size = (high_48h - low_48h) / low_48h * 100 if low_48h > 0 else 0
+    # Distance from current to high (closer to high = consolidating after pump)
+    dist_from_high = (high_48h - current) / high_48h * 100 if high_48h > 0 else 100
+    bait_score = 0
+    if pump_size >= 40 and dist_from_high < 25:
+        # Had a meaningful pump and now sitting near the high (range top)
+        bait_score = 15
+    elif pump_size >= 20 and dist_from_high < 30:
+        bait_score = 10
+
+    score = min(100, sustained_neg_score + consol_score + oi_score + bait_score)
+
+    # Build detail string
+    parts = []
+    if sustained_neg_score > 0:
+        parts.append(f"fund neg {negative_cycles}/8c (avg {avg_funding:+.4f}%)")
+    if consol_score > 0:
+        parts.append(f"range {consol_pct:.1f}%")
+    if oi_score > 0:
+        parts.append(f"OI {oi_change:+.1f}%")
+    if bait_score > 0:
+        parts.append(f"pump {pump_size:.0f}% / {dist_from_high:.0f}% off high")
+
+    # Phase classification
+    if score >= 60:
+        phase = "TRAP_SET"  # Phase 3 — squeeze imminent
+    elif score >= 40:
+        phase = "ACCUMULATING"  # Phase 2-3 transition
+    else:
+        phase = "no_setup"
+
+    return {
+        "score": round(score, 1),
+        "phase": phase,
+        "negative_cycles": negative_cycles,
+        "avg_funding": round(avg_funding, 4),
+        "consol_pct": round(consol_pct, 2),
+        "oi_change": round(oi_change, 2),
+        "pump_size": round(pump_size, 1),
+        "dist_from_high": round(dist_from_high, 1),
+        "detail": " | ".join(parts) if parts else "no setup",
+    }
+
+
 def analyze_crime_pump_risk(klines: list[list], oi_data: list[dict],
                             funding_data: list[dict], turnover_24h: float) -> dict:
     """
@@ -576,31 +693,59 @@ def analyze_crime_pump_risk(klines: list[list], oi_data: list[dict],
             crime_score += pts
             flags.append(f"Vol/OI {vol_oi_ratio:.0f}x (elevated)")
 
-    # 2. Extreme negative funding — squeeze trap
-    # Deeply negative funding means shorts are paying longs heavily
-    # Entering a long here means you're joining a squeeze that may already be ending
-    if current_funding < -0.05:
-        pts = min(25, abs(current_funding) / 0.1 * 25)
+    # 2. Extreme negative funding — only flag if it's the SQUEEZE peak, not the setup
+    # Deeply negative + price already pumped 50%+ in 24h = squeeze in progress (late entry)
+    # Deeply negative + price flat/consolidating = SETUP (we want to enter — handled by pre_squeeze)
+    move_24h_check = ((current - min(closes[-24:])) / min(closes[-24:]) * 100) if len(closes) >= 24 and min(closes[-24:]) > 0 else 0
+    if current_funding < -0.05 and move_24h_check > 50:
+        # This is the squeeze peak, not the setup — penalize
+        pts = min(20, abs(current_funding) / 0.1 * 20)
         crime_score += pts
-        flags.append(f"funding {current_funding:+.4f}% (squeeze trap)")
-    elif current_funding < -0.02:
-        pts = min(10, abs(current_funding) / 0.05 * 10)
-        crime_score += pts
-        flags.append(f"funding {current_funding:+.4f}% (negative)")
+        flags.append(f"funding {current_funding:+.4f}% during +{move_24h_check:.0f}% pump (late)")
 
-    # 3. Parabolic run — already pumped, you're exit liquidity
+    # 3. Parabolic run — only flag as DISTRIBUTION if signals confirm exit phase
+    # Active squeeze (negative funding + rising OI + rising price) is RIDEABLE
+    # Distribution (funding flipped positive OR OI dropping while price up) is the trap
     move_24h = ((current - low_24h) / low_24h * 100) if low_24h > 0 else 0
     move_48h = ((current - low_48h) / low_48h * 100) if low_48h > 0 else 0
 
+    # Determine if squeeze is still active or distribution has begun
+    oi_change_for_phase = 0
+    if len(oi_data) >= 2:
+        try:
+            old_oi = float(oi_data[-1].get("openInterest", 0))
+            if old_oi > 0:
+                oi_change_for_phase = (recent_oi - old_oi) / old_oi * 100
+        except (ValueError, TypeError):
+            pass
+
+    # Squeeze still alive: funding negative AND OI rising AND price rising
+    squeeze_active = current_funding < -0.01 and oi_change_for_phase > 5
+
+    # Distribution phase: parabolic but funding positive OR OI dropping
+    in_distribution = current_funding > 0.01 or oi_change_for_phase < -3
+
     if move_24h >= 200:
-        crime_score += 30
-        flags.append(f"+{move_24h:.0f}% in 24h (parabolic)")
+        if in_distribution:
+            crime_score += 30
+            flags.append(f"+{move_24h:.0f}% in 24h, distribution phase")
+        elif squeeze_active:
+            crime_score += 5  # mild penalty — squeeze still rideable but late
+            flags.append(f"+{move_24h:.0f}% in 24h, squeeze active (late)")
+        else:
+            crime_score += 20
+            flags.append(f"+{move_24h:.0f}% in 24h (parabolic)")
     elif move_24h >= 100:
-        crime_score += 20
-        flags.append(f"+{move_24h:.0f}% in 24h (extended)")
-    elif move_48h >= 200:
+        if in_distribution:
+            crime_score += 20
+            flags.append(f"+{move_24h:.0f}% in 24h, distribution")
+        elif not squeeze_active:
+            crime_score += 12
+            flags.append(f"+{move_24h:.0f}% in 24h (extended)")
+        # if squeeze_active, don't penalize — riding the rip
+    elif move_48h >= 200 and in_distribution:
         crime_score += 15
-        flags.append(f"+{move_48h:.0f}% in 48h (extended)")
+        flags.append(f"+{move_48h:.0f}% in 48h, distribution")
 
     # 4. OI outsized relative to daily turnover
     # If OI is 2x+ daily turnover, positions are way larger than real trading activity
@@ -682,8 +827,8 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
 
         if not symbol.endswith("USDT"):
             continue
-        if change_pct < MIN_PRICE_CHANGE_PCT:
-            continue
+        # Note: don't filter by % change here — MYX-style trap setups have flat 24h%
+        # but are the goldmine entries. Filter happens via scoring instead.
         if turnover_24h < MIN_TURNOVER_24H:
             continue
         if last_price <= 0:
@@ -700,23 +845,36 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
     # Sort by 24h turnover to prioritize liquid coins for deep analysis
     candidates.sort(key=lambda x: x["turnover24h"], reverse=True)
 
-    # Two-pool approach to catch both liquid movers AND emerging spikes:
+    # Three-pool approach to catch all setup types:
     #   Pool A: Top 50 by 24h volume (established, liquid coins)
-    #   Pool B: Top 30 by 24h % change (fast movers — catches early spikes
-    #           that don't yet have huge absolute volume)
+    #   Pool B: Top 30 by 24h % change (fast movers — catches active spikes)
+    #   Pool C: Top 30 flat-to-down with elevated turnover (MYX-style trap candidates
+    #           in consolidation, where the setup is built before the squeeze)
     pool_a = candidates[:50]
     pool_a_symbols = {c["symbol"] for c in pool_a}
 
-    # Pool B: sort by % change, exclude coins already in Pool A, require min $1M turnover
-    remaining = [c for c in candidates if c["symbol"] not in pool_a_symbols
-                 and c["turnover24h"] >= 1_000_000]
-    remaining.sort(key=lambda x: x["change24h"], reverse=True)
-    pool_b = remaining[:30]
+    # Pool B: sort by % change desc (skip negatives), exclude Pool A
+    remaining_b = [c for c in candidates if c["symbol"] not in pool_a_symbols
+                   and c["turnover24h"] >= 1_000_000 and c["change24h"] >= 1.0]
+    remaining_b.sort(key=lambda x: x["change24h"], reverse=True)
+    pool_b = remaining_b[:30]
+    pool_b_symbols = {c["symbol"] for c in pool_b}
 
-    scan_pool = pool_a + pool_b
+    # Pool C: flat to mildly down coins with decent turnover (potential trap setups)
+    # These are coins where price isn't moving but volume/OI suggests something is brewing
+    flat_candidates = [c for c in candidates
+                       if c["symbol"] not in pool_a_symbols
+                       and c["symbol"] not in pool_b_symbols
+                       and c["turnover24h"] >= 2_000_000
+                       and -10 <= c["change24h"] <= 5]
+    # Sort by turnover (more turnover during flat = more interesting)
+    flat_candidates.sort(key=lambda x: x["turnover24h"], reverse=True)
+    pool_c = flat_candidates[:30]
+
+    scan_pool = pool_a + pool_b + pool_c
 
     print(f"  {len(tickers)} perps found → {len(candidates)} candidates after filters")
-    print(f"  Scan pool: {len(pool_a)} by volume + {len(pool_b)} by % change = {len(scan_pool)} coins")
+    print(f"  Scan pool: {len(pool_a)} by volume + {len(pool_b)} by % change + {len(pool_c)} flat (trap setups) = {len(scan_pool)} coins")
     print()
 
     results = []
@@ -740,6 +898,7 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
             "funding_shift": analyze_funding_shift(funding_data),
             "streak": analyze_streak(klines),
             "squeeze_setup": analyze_squeeze_setup(funding_data, klines, oi_data, ls_ratio),
+            "pre_squeeze": analyze_pre_squeeze_setup(funding_data, klines, oi_data),
             "distribution_risk": analyze_distribution_risk(klines, oi_data),
             "crime_pump": analyze_crime_pump_risk(klines, oi_data, funding_data, c["turnover24h"]),
         }
@@ -793,10 +952,10 @@ def display_results(results: list[dict], env_label: str):
     # Header
     print(
         f"{'#':>3}  {'Symbol':<14} {'Price':>12} {'24h%':>8} {'Score':>6} {'Alert':<12}"
-        f"  {'Vol':>5} {'PrAcc':>5} {'OI':>5} {'Sqz':>5} {'Strk':>5} {'Pen':>5} {'Crime':>5}"
-        f"  {'Key Signal':<30}"
+        f"  {'Vol':>5} {'PrAcc':>5} {'OI':>5} {'Sqz':>5} {'PreSq':>5} {'Strk':>5} {'Pen':>5} {'Crime':>5}"
+        f"  {'Phase':<12}  {'Key Signal':<30}"
     )
-    print("-" * 150)
+    print("-" * 165)
 
     for i, r in enumerate(results, 1):
         s = r["signals"]
@@ -804,9 +963,11 @@ def display_results(results: list[dict], env_label: str):
         pa_s = s["price_accel"]["score"]
         oi_s = s["oi_surge"]["score"]
         sq_s = s["squeeze_setup"]["score"]
+        ps_s = s["pre_squeeze"]["score"]
         st_s = s["streak"]["score"]
         pen = s["distribution_risk"]["penalty"]
         crime = s["crime_pump"]["crime_score"]
+        phase = s["pre_squeeze"].get("phase", "—")
 
         # Pick the strongest signal as the key signal
         signal_scores = [
@@ -814,6 +975,7 @@ def display_results(results: list[dict], env_label: str):
             ("price_accel", pa_s),
             ("oi_surge", oi_s),
             ("squeeze_setup", sq_s),
+            ("pre_squeeze", ps_s),
             ("streak", st_s),
         ]
         top_signal_name, _ = max(signal_scores, key=lambda x: x[1])
@@ -823,11 +985,11 @@ def display_results(results: list[dict], env_label: str):
 
         print(
             f"{i:>3}  {r['symbol']:<14} {r['lastPrice']:>12,.6g} {r['change24h']:>+7.1f}% {r['momentum_score']:>5.1f} {alert:<12}"
-            f"  {vol_s:>5.0f} {pa_s:>5.0f} {oi_s:>5.0f} {sq_s:>5.0f} {st_s:>5.0f} {-pen:>5.0f} {crime:>5.0f}"
-            f"  {key_signal:<30}"
+            f"  {vol_s:>5.0f} {pa_s:>5.0f} {oi_s:>5.0f} {sq_s:>5.0f} {ps_s:>5.0f} {st_s:>5.0f} {-pen:>5.0f} {crime:>5.0f}"
+            f"  {phase:<12}  {key_signal:<30}"
         )
 
-    print("-" * 150)
+    print("-" * 165)
 
     # Detail section for top 5
     print(f"\n{'─'*60}")
@@ -845,6 +1007,9 @@ def display_results(results: list[dict], env_label: str):
         print(f"    Funding:  {s['funding_shift']['detail']}")
         print(f"    Streak:   {s['streak']['detail']}")
         print(f"    Squeeze:  {s['squeeze_setup']['detail']} (score {s['squeeze_setup']['score']})")
+        ps = s["pre_squeeze"]
+        if ps["score"] > 0:
+            print(f"    PreSqz:   {ps['detail']} (score {ps['score']}, phase: {ps['phase']})")
         print(f"    DistRisk: {s['distribution_risk']['detail']}")
         crime = s["crime_pump"]
         if crime["crime_score"] > 0:

@@ -583,8 +583,12 @@ def run_auto_trader(args):
                 print(f"     Vol: {signals['volume_anomaly']['detail']}")
                 print(f"     OI:  {signals['oi_surge']['detail']}")
                 sqz = signals.get("squeeze_setup", {})
+                pre = signals.get("pre_squeeze", {})
                 dist = signals.get("distribution_risk", {})
                 crime = signals.get("crime_pump", {})
+                if pre.get("score", 0) > 0:
+                    phase = pre.get("phase", "?")
+                    print(f"     PRE-SQUEEZE:   {pre['detail']} (score {pre['score']}, phase: {phase})")
                 if sqz.get("score", 0) > 0:
                     print(f"     Squeeze setup: {sqz['detail']} (score {sqz['score']})")
                 if dist.get("penalty", 0) > 0:
