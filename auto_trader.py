@@ -876,9 +876,11 @@ def main():
                         help=f"Minimum momentum score to trigger (default: {DEFAULT_MIN_SCORE})")
     parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL_MIN,
                         help=f"Scan interval in minutes (default: {DEFAULT_INTERVAL_MIN})")
+    parser.add_argument("--no-confirm", action="store_true",
+                        help="Skip interactive CONFIRM prompt (for dashboard/automation)")
     args = parser.parse_args()
 
-    if args.live and not args.testnet:
+    if args.live and not args.testnet and not args.no_confirm:
         print(f"\n  WARNING: You are about to run LIVE auto-trading on MAINNET.")
         print(f"  This will place REAL orders with REAL money.")
         print(f"  Amount: ${args.amount} per trade | Leverage: {args.leverage}x")

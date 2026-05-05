@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Bot Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace;
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        h1 {
+            text-align: center;
+            color: #58a6ff;
+            margin-bottom: 20px;
+            font-size: 1.4em;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+        .bot-panel {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+        }
+        .bot-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .bot-name {
+            font-size: 1.1em;
+            font-weight: 600;
+            color: #f0f6fc;
+        }
+        .status-badge {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.75em;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .status-running {
+            background: #0d419d;
+            color: #58a6ff;
+            border: 1px solid #1f6feb;
+        }
+        .status-stopped {
+            background: #3d1f1f;
+            color: #f85149;
+            border: 1px solid #da3633;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+            align-items: center;
+        }
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .control-group label {
+            font-size: 0.8em;
+            color: #8b949e;
+        }
+        input[type="number"] {
+            width: 80px;
+            padding: 6px 8px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            color: #c9d1d9;
+            font-size: 0.85em;
+            font-family: inherit;
+        }
+        input[type="number"]:focus {
+            border-color: #58a6ff;
+            outline: none;
+        }
+        .btn {
+            padding: 6px 14px;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            font-size: 0.8em;
+            font-weight: 500;
+            cursor: pointer;
+            font-family: inherit;
+            transition: all 0.15s;
+        }
+        .btn:hover { opacity: 0.85; }
+        .btn:active { transform: scale(0.97); }
+        .btn-start {
+            background: #238636;
+            color: #fff;
+            border-color: #2ea043;
+        }
+        .btn-stop {
+            background: #da3633;
+            color: #fff;
+            border-color: #f85149;
+        }
+        .btn-caff {
+            background: #1f2937;
+            color: #c9d1d9;
+        }
+        .btn-caff.active {
+            background: #7c3aed;
+            color: #fff;
+            border-color: #8b5cf6;
+        }
+        .btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 0.8em;
+            color: #8b949e;
+        }
+        .checkbox-group input { margin: 0; }
+        .log-container {
+            flex: 1;
+            min-height: 400px;
+            max-height: 60vh;
+            background: #010409;
+            border: 1px solid #21262d;
+            border-radius: 6px;
+            overflow-y: auto;
+            padding: 10px;
+            font-size: 0.72em;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .log-line { color: #8b949e; }
+        .log-line:has(.highlight) { color: #58a6ff; }
+        .uptime {
+            font-size: 0.75em;
+            color: #8b949e;
+            margin-top: 8px;
+            text-align: right;
+        }
+        @media (max-width: 1000px) {
+            .grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <h1>Trading Bot Dashboard</h1>
+    <div class="grid">
+        <div class="bot-panel" id="panel-auto_trader">
+            <div class="bot-header">
+                <span class="bot-name">Accumulation Trader</span>
+                <span class="status-badge status-stopped" id="status-auto_trader">STOPPED</span>
+            </div>
+            <div class="controls">
+                <div class="control-group">
+                    <label>Amount $</label>
+                    <input type="number" id="amount-auto_trader" value="250" min="10" max="10000" step="50">
+                </div>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="live-auto_trader">
+                    <label for="live-auto_trader">Live</label>
+                </div>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="testnet-auto_trader">
+                    <label for="testnet-auto_trader">Testnet</label>
+                </div>
+                <button class="btn btn-start" onclick="startBot('auto_trader')">Start</button>
+                <button class="btn btn-stop" onclick="stopBot('auto_trader')">Stop</button>
+                <button class="btn btn-caff" id="caff-auto_trader" onclick="toggleCaff('auto_trader')">Caffeinate</button>
+            </div>
+            <div class="log-container" id="logs-auto_trader"></div>
+            <div class="uptime" id="uptime-auto_trader"></div>
+        </div>
+
+        <div class="bot-panel" id="panel-sfp_scanner">
+            <div class="bot-header">
+                <span class="bot-name">SFP Scanner</span>
+                <span class="status-badge status-stopped" id="status-sfp_scanner">STOPPED</span>
+            </div>
+            <div class="controls">
+                <div class="control-group">
+                    <label>Amount $</label>
+                    <input type="number" id="amount-sfp_scanner" value="250" min="10" max="10000" step="50">
+                </div>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="live-sfp_scanner">
+                    <label for="live-sfp_scanner">Live</label>
+                </div>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="testnet-sfp_scanner">
+                    <label for="testnet-sfp_scanner">Testnet</label>
+                </div>
+                <button class="btn btn-start" onclick="startBot('sfp_scanner')">Start</button>
+                <button class="btn btn-stop" onclick="stopBot('sfp_scanner')">Stop</button>
+                <button class="btn btn-caff" id="caff-sfp_scanner" onclick="toggleCaff('sfp_scanner')">Caffeinate</button>
+            </div>
+            <div class="log-container" id="logs-sfp_scanner"></div>
+            <div class="uptime" id="uptime-sfp_scanner"></div>
+        </div>
+    </div>
+
+    <script>
+        const eventSources = {};
+        let statusInterval;
+
+        function startBot(name) {
+            const amount = document.getElementById(`amount-${name}`).value;
+            const live = document.getElementById(`live-${name}`).checked;
+            const testnet = document.getElementById(`testnet-${name}`).checked;
+
+            if (live && !confirm(`Start ${name} in LIVE mode with $${amount} per trade?`)) return;
+
+            fetch(`/api/bot/${name}/start`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({amount: parseFloat(amount), live, testnet})
+            }).then(r => r.json()).then(data => {
+                if (data.ok) {
+                    connectLogs(name);
+                    refreshStatus();
+                } else {
+                    alert(data.error || 'Failed to start');
+                }
+            });
+        }
+
+        function stopBot(name) {
+            fetch(`/api/bot/${name}/stop`, {method: 'POST'})
+                .then(r => r.json())
+                .then(() => refreshStatus());
+        }
+
+        function toggleCaff(name) {
+            fetch(`/api/bot/${name}/caffeinate`, {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    const btn = document.getElementById(`caff-${name}`);
+                    btn.classList.toggle('active', data.caffeinate);
+                });
+        }
+
+        function connectLogs(name) {
+            if (eventSources[name]) {
+                eventSources[name].close();
+            }
+            const logEl = document.getElementById(`logs-${name}`);
+            logEl.innerHTML = '';
+
+            const es = new EventSource(`/api/bot/${name}/logs`);
+            eventSources[name] = es;
+
+            es.onmessage = (event) => {
+                const line = document.createElement('div');
+                line.className = 'log-line';
+                line.textContent = event.data;
+                logEl.appendChild(line);
+
+                // Auto-scroll
+                logEl.scrollTop = logEl.scrollHeight;
+
+                // Limit DOM nodes
+                while (logEl.children.length > 800) {
+                    logEl.removeChild(logEl.firstChild);
+                }
+            };
+
+            es.onerror = () => {
+                setTimeout(() => connectLogs(name), 3000);
+            };
+        }
+
+        function refreshStatus() {
+            fetch('/api/status').then(r => r.json()).then(bots => {
+                bots.forEach(bot => {
+                    const badge = document.getElementById(`status-${bot.name}`);
+                    badge.textContent = bot.status.toUpperCase();
+                    badge.className = `status-badge status-${bot.status}`;
+
+                    const caff = document.getElementById(`caff-${bot.name}`);
+                    caff.classList.toggle('active', bot.caffeinate);
+
+                    const uptime = document.getElementById(`uptime-${bot.name}`);
+                    if (bot.status === 'running' && bot.uptime_s > 0) {
+                        const m = Math.floor(bot.uptime_s / 60);
+                        const h = Math.floor(m / 60);
+                        uptime.textContent = h > 0 ? `Running ${h}h ${m%60}m` : `Running ${m}m`;
+                    } else {
+                        uptime.textContent = '';
+                    }
+                });
+            });
+        }
+
+        // Init
+        refreshStatus();
+        statusInterval = setInterval(refreshStatus, 5000);
+        // Connect logs for any running bots
+        fetch('/api/status').then(r => r.json()).then(bots => {
+            bots.forEach(bot => {
+                if (bot.status === 'running') connectLogs(bot.name);
+            });
+        });
+    </script>
+</body>
+</html>

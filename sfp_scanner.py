@@ -1622,6 +1622,8 @@ def main():
                         help="Zero-hero mode: no initial SL, trailing stops only")
     parser.add_argument("--min-grade", type=str, default=DEFAULT_MIN_TRADE_GRADE,
                         help=f"Min SFP grade to trade: A+, A, B, C (default: {DEFAULT_MIN_TRADE_GRADE})")
+    parser.add_argument("--no-confirm", action="store_true",
+                        help="Skip interactive CONFIRM prompt (for dashboard/automation)")
     args = parser.parse_args()
 
     if args.no_stops:
@@ -1656,7 +1658,7 @@ def main():
         init_sfp_logs()
         pos_state = load_sfp_state()
 
-        if is_live and not args.testnet:
+        if is_live and not args.testnet and not args.no_confirm:
             print(f"\n  WARNING: LIVE SFP auto-trading on MAINNET.")
             print(f"  ${args.amount} per trade | {args.leverage}x | Min grade: {args.min_grade}")
             if args.no_stops:
