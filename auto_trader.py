@@ -64,7 +64,7 @@ RECV_WINDOW = "5000"
 
 # Safety defaults
 DEFAULT_AMOUNT_USDT = 250       # $ per trade
-DEFAULT_MIN_SCORE = 60          # HIGH threshold (catch momentum early)
+DEFAULT_MIN_SCORE = 40          # ELEVATED threshold (catch accumulation earlier)
 DEFAULT_INTERVAL_MIN = 15       # scan every 15 minutes
 MAX_TRADES_PER_CYCLE = 2        # max trades per scan cycle
 MAX_TRADES_PER_DAY = 6          # max trades in 24 hours
@@ -589,9 +589,9 @@ def run_auto_trader(args):
     print(f"  Trade amount:    ${args.amount} USDT per trade")
     print(f"  Leverage:        {args.leverage}x")
     print(f"  Strategy:        Pool D accumulation → exit on graduation")
-    print(f"  Entry:           Pool D only (quiet coins, accumulation phase)")
+    print(f"  Entry:           Pool D only (score 25+ AND accum signal 20+)")
+    print(f"  Watch:           Pool A/B/C coins shown at score {args.min_score}+")
     print(f"  Exit:            Pool A/B graduation, funding flip, OI drop, 200%+ extension")
-    print(f"  Min score:       {args.min_score} (trigger threshold)")
     print(f"  Scan interval:   every {args.interval} minutes")
     print(f"  Max per cycle:   {MAX_TRADES_PER_CYCLE} trades")
     print(f"  Max per day:     {MAX_TRADES_PER_DAY} trades")
@@ -717,25 +717,38 @@ def run_auto_trader(args):
             print()
 
         # ── ENTRY SCAN: find new Pool D accumulation candidates ──
-        results = run_scan(base_url, top_n=20, min_score=args.min_score)
+        results = run_scan(base_url, top_n=40, min_score=25)
 
         if not results:
             print(f"\n  No coins above score {args.min_score}. Waiting...\n")
         else:
-            # Only enter Pool D coins (quiet accumulation phase)
+            # Pool D uses a lower composite threshold (25) since accumulation
+            # setups are inherently quieter — we rely on the accumulation signal
+            # score (weighted 30%) being meaningful rather than needing all signals firing
+            pool_d_entry_threshold = 25
             pool_d_results = [r for r in results if r.get("pool") == "D"
-                              and r["momentum_score"] >= args.min_score]
+                              and r["momentum_score"] >= pool_d_entry_threshold
+                              and r["signals"].get("accumulation", {}).get("score", 0) >= 20]
             other_results = [r for r in results if r.get("pool") != "D"
                              and r["momentum_score"] >= args.min_score]
 
+            all_pool_d = [r for r in results if r.get("pool") == "D"]
             if other_results:
                 print(f"\n  {len(other_results)} coin(s) in Pool A/B/C (watch only, not trading):")
                 for r in other_results[:5]:
                     print(f"    {r['pool']} {r['symbol']:<14} Score: {r['momentum_score']:.0f} | "
                           f"24h: {r['change24h']:+.1f}% | Vol: ${r['turnover24h']/1e6:,.1f}M")
 
+            if all_pool_d and not pool_d_results:
+                print(f"\n  {len(all_pool_d)} Pool D coins found but none above entry threshold:")
+                for r in all_pool_d[:8]:
+                    acc = r["signals"].get("accumulation", {})
+                    print(f"    D {r['symbol']:<14} Score: {r['momentum_score']:.0f} | "
+                          f"Accum: {acc.get('score',0):.0f} | {acc.get('phase','?')} | {r['change24h']:+.1f}% | ${r['turnover24h']/1e6:,.1f}M")
+                print()
+
             if not pool_d_results:
-                print(f"\n  No Pool D accumulation candidates above threshold. Waiting...\n")
+                print(f"\n  No Pool D accumulation candidates above entry threshold. Waiting...\n")
             else:
                 print(f"\n  {len(pool_d_results)} Pool D accumulation candidate(s):\n")
 
