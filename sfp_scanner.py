@@ -613,6 +613,7 @@ def run_sfp_scan(base_url, args, consumed_levels):
 
     min_turnover = args.min_volume * 1_000_000
     candidates = []
+    all_usdt_turnovers = []
     for t in tickers:
         try:
             symbol = t["symbol"]
@@ -621,16 +622,32 @@ def run_sfp_scan(base_url, args, consumed_levels):
             change = float(t.get("price24hPcnt", 0)) * 100
         except (ValueError, TypeError, KeyError):
             continue
-        if not symbol.endswith("USDT") or turnover < min_turnover or price <= 0:
+        if not symbol.endswith("USDT"):
+            continue
+        all_usdt_turnovers.append((symbol, turnover))
+        if turnover < min_turnover or price <= 0:
             continue
         candidates.append({"symbol": symbol, "lastPrice": price,
                            "change24h": change, "turnover24h": turnover})
 
     candidates.sort(key=lambda x: x["turnover24h"], reverse=True)
 
+    # Debug: show turnover distribution so we can verify API data
+    all_usdt_turnovers.sort(key=lambda x: x[1], reverse=True)
+    n_usdt = len(all_usdt_turnovers)
+    n_above_10m = sum(1 for _, tv in all_usdt_turnovers if tv >= 10_000_000)
+    n_above_2m = sum(1 for _, tv in all_usdt_turnovers if tv >= 2_000_000)
+    n_above_1m = sum(1 for _, tv in all_usdt_turnovers if tv >= 1_000_000)
+    n_zero = sum(1 for _, tv in all_usdt_turnovers if tv == 0)
+    print(f"  {len(tickers)} perps total, {n_usdt} USDT pairs")
+    print(f"  Turnover: {n_above_10m} >$10M | {n_above_2m} >$2M | {n_above_1m} >$1M | {n_zero} zero")
+    if all_usdt_turnovers:
+        top3 = all_usdt_turnovers[:3]
+        print(f"  Top 3: {', '.join(f'{s} ${tv/1e6:.0f}M' for s, tv in top3)}")
+
     pivot_label = INTERVAL_LABELS.get(args.pivot_tf, args.pivot_tf)
     count_label = INTERVAL_LABELS.get(args.count_tf, args.count_tf)
-    print(f"  {len(tickers)} perps total → {len(candidates)} with >${args.min_volume}M volume")
+    print(f"  {len(candidates)} pass >${args.min_volume}M filter")
     print(f"  Pivots on {pivot_label} (L{args.pivot_left}/R{args.pivot_right}, {args.pivot_source})")
     print(f"  Count on {count_label} | levels {args.levels_to_scan} | breakout {args.min_bars}-{args.max_bars} bars")
     if args.ma_filter:

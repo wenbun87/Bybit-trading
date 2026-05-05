@@ -1321,8 +1321,9 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
         print("  Failed to fetch tickers.")
         return []
 
-    # Pre-filter: positive 24h change, minimum liquidity, USDT pairs
+    # Pre-filter: minimum liquidity, USDT pairs
     candidates = []
+    all_usdt_turnovers = []
     for t in tickers:
         try:
             symbol = t["symbol"]
@@ -1335,8 +1336,9 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
 
         if not symbol.endswith("USDT"):
             continue
-        # Note: don't filter by % change here — MYX-style trap setups have flat 24h%
-        # but are the goldmine entries. Filter happens via scoring instead.
+
+        all_usdt_turnovers.append((symbol, turnover_24h))
+
         if turnover_24h < MIN_TURNOVER_24H:
             continue
         if last_price <= 0:
@@ -1352,6 +1354,18 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
 
     # Sort by 24h turnover to prioritize liquid coins for deep analysis
     candidates.sort(key=lambda x: x["turnover24h"], reverse=True)
+
+    # Debug: show turnover distribution to verify API data
+    all_usdt_turnovers.sort(key=lambda x: x[1], reverse=True)
+    n_usdt = len(all_usdt_turnovers)
+    n_above_10m = sum(1 for _, tv in all_usdt_turnovers if tv >= 10_000_000)
+    n_above_1m = sum(1 for _, tv in all_usdt_turnovers if tv >= 1_000_000)
+    n_zero = sum(1 for _, tv in all_usdt_turnovers if tv == 0)
+    print(f"  {len(tickers)} perps total, {n_usdt} USDT pairs")
+    print(f"  Turnover: {n_above_10m} >$10M | {n_above_1m} >$1M | {n_zero} zero | {len(candidates)} pass >${MIN_TURNOVER_24H/1e6:.1f}M filter")
+    if all_usdt_turnovers:
+        top3 = all_usdt_turnovers[:3]
+        print(f"  Top 3: {', '.join(f'{s} ${tv/1e6:.0f}M' for s, tv in top3)}")
 
     # Four-pool approach to catch all setup types:
     #   Pool A: Top 50 by 24h volume (established, liquid coins)
@@ -1403,8 +1417,7 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
     for c in pool_d:
         pool_tags[c["symbol"]] = "D"
 
-    print(f"  {len(tickers)} perps found → {len(candidates)} candidates after filters")
-    print(f"  Scan pool: {len(pool_a)} volume + {len(pool_b)} movers + {len(pool_c)} flat + {len(pool_d)} quiet (accumulation) = {len(scan_pool)} coins")
+    print(f"  Pools: {len(pool_a)}A + {len(pool_b)}B + {len(pool_c)}C + {len(pool_d)}D = {len(scan_pool)} coins to deep-scan")
 
     # Pre-fetch CoinGecko supply data for all scan pool coins (batched, cached)
     all_symbols = [c["symbol"] for c in scan_pool]
