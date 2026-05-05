@@ -589,7 +589,7 @@ def run_auto_trader(args):
     print(f"  Trade amount:    ${args.amount} USDT per trade")
     print(f"  Leverage:        {args.leverage}x")
     print(f"  Strategy:        Pool D accumulation → exit on graduation")
-    print(f"  Entry:           Pool D only (score 25+ AND accum signal 20+)")
+    print(f"  Entry:           Pool D only (score 20+ AND accum signal 20+)")
     print(f"  Watch:           Pool A/B/C coins shown at score {args.min_score}+")
     print(f"  Exit:            Pool A/B graduation, funding flip, OI drop, 200%+ extension")
     print(f"  Scan interval:   every {args.interval} minutes")
@@ -717,15 +717,16 @@ def run_auto_trader(args):
             print()
 
         # ── ENTRY SCAN: find new Pool D accumulation candidates ──
-        results = run_scan(base_url, top_n=40, min_score=25)
+        results = run_scan(base_url, top_n=40, min_score=20)
 
         if not results:
             print(f"\n  No coins above score {args.min_score}. Waiting...\n")
         else:
-            # Pool D uses a lower composite threshold (25) since accumulation
-            # setups are inherently quieter — we rely on the accumulation signal
-            # score (weighted 30%) being meaningful rather than needing all signals firing
-            pool_d_entry_threshold = 25
+            # Pool D threshold is lower (20) because quiet coins score ~0 on
+            # volume_anomaly/price_accel/streak (70% of the weight). A strong
+            # accumulation signal (30% weight) maxes out at 30 composite points.
+            # FHE backtest: scored 23-25 during accumulation, missed at 25 threshold.
+            pool_d_entry_threshold = 20
             pool_d_results = [r for r in results if r.get("pool") == "D"
                               and r["momentum_score"] >= pool_d_entry_threshold
                               and r["signals"].get("accumulation", {}).get("score", 0) >= 20]
