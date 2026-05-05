@@ -126,7 +126,7 @@ def run_day(days_ago, supply_info):
     crime = signals["crime_pump"]
 
     in_pool_d = turnover_24h <= 5_000_000 and turnover_24h >= MIN_TURNOVER_24H
-    composite_pass = momentum_score >= 20
+    composite_pass = momentum_score >= 25
     accum_pass = acc["score"] >= 20
     crime_blocked = crime["blocked"]
 
