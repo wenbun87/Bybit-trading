@@ -630,30 +630,40 @@ def analyze_accumulation(daily_klines: list[list], oi_data: list[dict],
     score = 0
 
     # Signal 1: Volume ramp — recent volume vs baseline
-    # The key accumulation signal: turnover climbing from dead levels
+    # The key accumulation signal: turnover climbing from dead levels.
+    # Check TWO windows: 3d vs baseline AND 1d vs 7d.
+    # The 1d check catches coins that JUST started waking up (FHE pattern:
+    # completely dead for 2 weeks, then a single day of 5-10x volume spike).
     recent_3d = d_turnovers[-3:] if len(d_turnovers) >= 3 else d_turnovers[-1:]
-    avg_recent = sum(recent_3d) / len(recent_3d)
+    avg_recent_3d = sum(recent_3d) / len(recent_3d)
 
     older = d_turnovers[:-3] if len(d_turnovers) > 3 else d_turnovers[:1]
     avg_baseline = sum(older) / len(older) if older else 1
 
-    if avg_baseline > 0:
-        vol_ramp = avg_recent / avg_baseline
-    else:
-        vol_ramp = 0
+    vol_ramp_3d = avg_recent_3d / avg_baseline if avg_baseline > 0 else 0
+
+    # 1-day spike check: today's turnover vs prior 7-day average
+    last_1d = d_turnovers[-1] if d_turnovers else 0
+    prior_7d = d_turnovers[-8:-1] if len(d_turnovers) >= 8 else d_turnovers[:-1]
+    avg_prior_7d = sum(prior_7d) / len(prior_7d) if prior_7d else 1
+    vol_ramp_1d = last_1d / avg_prior_7d if avg_prior_7d > 0 else 0
+
+    # Use the stronger of the two signals
+    vol_ramp = max(vol_ramp_3d, vol_ramp_1d)
+    ramp_label = "1d" if vol_ramp_1d > vol_ramp_3d else "3d"
 
     if vol_ramp >= 5:
         score += 30
-        flags.append(f"vol ramp {vol_ramp:.1f}x (strong)")
+        flags.append(f"vol ramp {vol_ramp:.1f}x {ramp_label} (strong)")
     elif vol_ramp >= 3:
         score += 25
-        flags.append(f"vol ramp {vol_ramp:.1f}x")
+        flags.append(f"vol ramp {vol_ramp:.1f}x {ramp_label}")
     elif vol_ramp >= 2:
         score += 15
-        flags.append(f"vol ramp {vol_ramp:.1f}x (early)")
+        flags.append(f"vol ramp {vol_ramp:.1f}x {ramp_label} (early)")
     elif vol_ramp >= 1.5:
         score += 8
-        flags.append(f"vol ramp {vol_ramp:.1f}x (slight)")
+        flags.append(f"vol ramp {vol_ramp:.1f}x {ramp_label} (slight)")
 
     # Signal 2: OI building from low base
     # Rising OI on a quiet coin = new positions being opened
@@ -1394,15 +1404,17 @@ def run_scan(base_url: str, top_n: int = 20, min_score: float = 0) -> list[dict]
     pool_c_symbols = {c["symbol"] for c in pool_c}
 
     # Pool D: quiet low-turnover coins — the accumulation sweet spot
-    # $100K-$5M daily turnover, any price direction, not in other pools
-    # These are under-the-radar coins where volume may be just starting to wake up
+    # $100K-$5M daily turnover, any price direction, not in other pools.
+    # Sort by 24h % change descending — coins "waking up" (any direction) rank first.
+    # This ensures the FHE/LAB/RAVE-type coins that just started moving get scanned,
+    # rather than being pushed out by higher-turnover-but-still-dead coins.
     quiet_candidates = [c for c in candidates
                         if c["symbol"] not in pool_a_symbols
                         and c["symbol"] not in pool_b_symbols
                         and c["symbol"] not in pool_c_symbols
                         and c["turnover24h"] <= 5_000_000]
-    quiet_candidates.sort(key=lambda x: x["turnover24h"], reverse=True)
-    pool_d = quiet_candidates[:30]
+    quiet_candidates.sort(key=lambda x: abs(x["change24h"]), reverse=True)
+    pool_d = quiet_candidates[:50]
 
     scan_pool = pool_a + pool_b + pool_c + pool_d
 
