@@ -1607,7 +1607,7 @@ def main():
                         help=f"Right bars for M5 swing detection (default: {DEFAULT_MSB_SWING_RIGHT})")
     parser.add_argument("--msb-lookback", type=int, default=DEFAULT_MSB_LOOKBACK,
                         help=f"Max count-TF bars after SFP to find MSB (default: {DEFAULT_MSB_LOOKBACK})")
-    parser.add_argument("--watch", type=int, default=15, help="Rescan interval in minutes (default: 15, 0 for one-shot)")
+    parser.add_argument("--watch", type=int, default=5, help="Rescan interval in minutes (default: 5, 0 for one-shot)")
     parser.add_argument("--save", action="store_true", help="Save results to JSON")
     # Trading flags
     parser.add_argument("--trade", action="store_true", help="Enable auto-trading (dry-run by default)")

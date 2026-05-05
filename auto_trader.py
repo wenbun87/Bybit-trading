@@ -565,7 +565,12 @@ def run_auto_trader(args):
     env_label = "TESTNET" if args.testnet else "MAINNET"
     mode = "LIVE" if args.live else "DRY-RUN"
 
-    api_key, api_secret = get_credentials()
+    # Only require API keys for live mode
+    if args.live:
+        api_key, api_secret = get_credentials()
+    else:
+        api_key = os.environ.get("BYBIT_API_KEY", "")
+        api_secret = os.environ.get("BYBIT_API_SECRET", "")
 
     session = TradingSession(
         max_per_cycle=MAX_TRADES_PER_CYCLE,
@@ -579,7 +584,7 @@ def run_auto_trader(args):
 
     # Display config
     print(f"\n{'='*70}")
-    print(f"  MOMENTUM AUTO-TRADER [{env_label}] [{mode}]")
+    print(f"  ACCUMULATION AUTO-TRADER [{env_label}] [{mode}]")
     print(f"{'='*70}")
     print(f"  Trade amount:    ${args.amount} USDT per trade")
     print(f"  Leverage:        {args.leverage}x")
@@ -602,16 +607,18 @@ def run_auto_trader(args):
         print(f"\n  >>> LIVE MODE — REAL ORDERS WILL BE PLACED <<<")
         print(f"  >>> Trading ${args.amount} per signal on {env_label} <<<")
 
-    # Verify connection
-    print(f"\n  Verifying connection...")
-    balance = check_balance(base_url, api_key, api_secret)
-    if balance is None:
-        print("  Failed to connect. Check your API credentials.")
-        sys.exit(1)
-    print(f"  Connected. Available balance: ${balance:,.2f} USDT")
-
-    positions = get_open_positions(base_url, api_key, api_secret)
-    print(f"  Open positions: {len(positions)}")
+    if args.live:
+        # Verify connection (only needed for live trading)
+        print(f"\n  Verifying connection...")
+        balance = check_balance(base_url, api_key, api_secret)
+        if balance is None:
+            print("  Failed to connect. Check your API credentials.")
+            sys.exit(1)
+        print(f"  Connected. Available balance: ${balance:,.2f} USDT")
+        positions = get_open_positions(base_url, api_key, api_secret)
+        print(f"  Open positions: {len(positions)}")
+    else:
+        print(f"\n  Paper mode — no API keys required. Using public data only.")
     print(f"{'='*70}\n")
 
     # Main loop
