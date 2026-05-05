@@ -164,6 +164,10 @@
 </head>
 <body>
     <h1>Trading Bot Dashboard</h1>
+    <p style="text-align:center; color:#8b949e; font-size:0.78em; margin-bottom:18px;">
+        Live trades OFF = paper trade on real Bybit mainnet data (no API key needed).
+        Live trades ON = real money trades via your Bybit API keys.
+    </p>
     <div class="grid">
         <div class="bot-panel" id="panel-auto_trader">
             <div class="bot-header">
@@ -177,11 +181,7 @@
                 </div>
                 <div class="checkbox-group">
                     <input type="checkbox" id="live-auto_trader">
-                    <label for="live-auto_trader">Live</label>
-                </div>
-                <div class="checkbox-group">
-                    <input type="checkbox" id="testnet-auto_trader">
-                    <label for="testnet-auto_trader">Testnet</label>
+                    <label for="live-auto_trader" title="When OFF: paper trade on real mainnet data. When ON: real money trades.">Live trades</label>
                 </div>
                 <button class="btn btn-start" onclick="startBot('auto_trader')">Start</button>
                 <button class="btn btn-stop" onclick="stopBot('auto_trader')">Stop</button>
@@ -203,11 +203,7 @@
                 </div>
                 <div class="checkbox-group">
                     <input type="checkbox" id="live-sfp_scanner">
-                    <label for="live-sfp_scanner">Live</label>
-                </div>
-                <div class="checkbox-group">
-                    <input type="checkbox" id="testnet-sfp_scanner">
-                    <label for="testnet-sfp_scanner">Testnet</label>
+                    <label for="live-sfp_scanner" title="When OFF: paper trade on real mainnet data. When ON: real money trades.">Live trades</label>
                 </div>
                 <button class="btn btn-start" onclick="startBot('sfp_scanner')">Start</button>
                 <button class="btn btn-stop" onclick="stopBot('sfp_scanner')">Stop</button>
@@ -225,14 +221,13 @@
         function startBot(name) {
             const amount = document.getElementById(`amount-${name}`).value;
             const live = document.getElementById(`live-${name}`).checked;
-            const testnet = document.getElementById(`testnet-${name}`).checked;
 
             if (live && !confirm(`Start ${name} in LIVE mode with $${amount} per trade?`)) return;
 
             fetch(`/api/bot/${name}/start`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({amount: parseFloat(amount), live, testnet})
+                body: JSON.stringify({amount: parseFloat(amount), live})
             }).then(r => r.json()).then(data => {
                 if (data.ok) {
                     connectLogs(name);

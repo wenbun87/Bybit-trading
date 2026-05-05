@@ -39,10 +39,9 @@ async def start_bot(name: str, request: Request):
     body = await request.json()
     amount = float(body.get("amount", 250))
     live = bool(body.get("live", False))
-    testnet = bool(body.get("testnet", False))
     extra_args = body.get("extra_args", [])
     result = bot_manager.start_bot(name, amount=amount, live=live,
-                                   testnet=testnet, extra_args=extra_args)
+                                   extra_args=extra_args)
     return result
 
 

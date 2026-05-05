@@ -96,7 +96,7 @@ def _reader_thread(state: BotState):
 
 
 def start_bot(name: str, amount: float = 250, live: bool = False,
-              testnet: bool = False, extra_args: list | None = None) -> dict:
+              extra_args: list | None = None) -> dict:
     state = _bots[name]
     if state.status == "running":
         return {"ok": False, "error": "already running"}
@@ -104,17 +104,14 @@ def start_bot(name: str, amount: float = 250, live: bool = False,
     info = BOTS[name]
     cmd = ["python3", "-u", str(BOT_DIR / info["script"])]
 
-    # Add amount
+    # Always uses Bybit mainnet — paper mode (default) uses real ticker data
+    # without placing trades; live mode places real trades via API keys.
     cmd.extend(["--amount", str(amount)])
-
-    # Add default args for this bot
     cmd.extend(info["default_args"])
 
     if live:
         cmd.append("--live")
         cmd.append("--no-confirm")
-    if testnet:
-        cmd.append("--testnet")
     if extra_args:
         cmd.extend(extra_args)
 
