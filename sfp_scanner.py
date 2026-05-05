@@ -1607,7 +1607,7 @@ def main():
                         help=f"Right bars for M5 swing detection (default: {DEFAULT_MSB_SWING_RIGHT})")
     parser.add_argument("--msb-lookback", type=int, default=DEFAULT_MSB_LOOKBACK,
                         help=f"Max count-TF bars after SFP to find MSB (default: {DEFAULT_MSB_LOOKBACK})")
-    parser.add_argument("--watch", type=int, default=5, help="Rescan interval in minutes (default: 5, 0 for one-shot)")
+    parser.add_argument("--watch", type=int, default=15, help="Rescan interval in minutes (default: 15, 0 for one-shot)")
     parser.add_argument("--save", action="store_true", help="Save results to JSON")
     # Trading flags
     parser.add_argument("--trade", action="store_true", help="Enable auto-trading (dry-run by default)")
@@ -1731,37 +1731,9 @@ def main():
                 paper.display_summary()
             break
 
-        if trading_mode:
-            print(f"\n  Next scan in {args.watch} min (positions checked every 1 min)... (Ctrl+C to stop)\n")
-        elif paper:
-            print(f"\n  Next scan in {args.watch} min (paper positions updated every 1 min)... (Ctrl+C to stop)\n")
-        else:
-            print(f"\n  Next scan in {args.watch} minutes... (Ctrl+C to stop)\n")
+        print(f"\n  Next scan + P&L update in {args.watch} min... (Ctrl+C to stop)\n")
         try:
-            remaining = args.watch * 60
-            while remaining > 0:
-                if trading_mode:
-                    wait = min(60, remaining)
-                elif paper:
-                    wait = min(60, remaining)
-                else:
-                    wait = remaining
-                time.sleep(wait)
-                remaining -= wait
-                if remaining > 0 and trading_mode:
-                    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-                    print(f"  [position check | {now} | next scan in {remaining//60}m{remaining%60:02d}s]")
-                    pos_state = manage_sfp_positions(
-                        base_url, api_key, api_secret, args.initial_sl, is_live, pos_state)
-                elif remaining > 0 and paper:
-                    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-                    tickers = fetch_linear_tickers(base_url)
-                    paper.update_prices(tickers)
-                    open_ct = len(paper.positions)
-                    closed_ct = len(paper.closed_trades)
-                    total_closed_pnl = sum(t["pnl_usd"] for t in paper.closed_trades)
-                    print(f"  [paper update | {now} | {open_ct} open, {closed_ct} closed, "
-                          f"realized ${total_closed_pnl:+,.2f} | next scan in {remaining//60}m{remaining%60:02d}s]")
+            time.sleep(args.watch * 60)
         except KeyboardInterrupt:
             if paper:
                 paper.display_summary()

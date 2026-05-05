@@ -24,7 +24,7 @@ BOTS = {
     "sfp_scanner": {
         "script": "sfp_scanner.py",
         "label": "SFP Scanner",
-        "default_args": ["--watch", "5"],
+        "default_args": ["--watch", "15"],
     },
 }
 
