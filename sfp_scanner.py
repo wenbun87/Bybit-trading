@@ -46,6 +46,8 @@ import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
+import shared_state
+
 # ──────────────────────────────────────────────
 # Config
 # ──────────────────────────────────────────────
@@ -114,7 +116,7 @@ SFP_STATE_FILE = "sfp_position_state.json"
 # Paper trading defaults
 PAPER_AMOUNT_USDT = 500
 PAPER_LEVERAGE = 10
-SL_BUFFER_PCT = 0.15   # 0.15% beyond sweep price for stop loss
+SL_BUFFER_PCT = 1.0    # 1.0% beyond sweep price for stop loss (0.15% was too tight for crypto volatility)
 
 # ──────────────────────────────────────────────
 # Rate-limited API client
@@ -143,18 +145,22 @@ def api_get(base_url, path, params=None):
         "User-Agent": USER_AGENT,
         "X-Referer": "bybit-skill",
     })
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            _last_call_ts = time.time()
-            _call_count += 1
-            data = json.loads(resp.read())
-            if data.get("retCode") == 10006:
-                _rate_limit_hits += 1
-                time.sleep(0.5 + _rate_limit_hits * 0.5)
-                return api_get(base_url, path, params)
-            return data
-    except (urllib.error.URLError, TimeoutError, OSError):
-        return {"retCode": -1, "result": {}}
+    last_data: dict = {"retCode": -1, "result": {}}
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                _last_call_ts = time.time()
+                _call_count += 1
+                data = json.loads(resp.read())
+                if data.get("retCode") == 10006:
+                    _rate_limit_hits += 1
+                    time.sleep(0.5 + _rate_limit_hits * 0.5)
+                    last_data = data
+                    continue
+                return data
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return {"retCode": -1, "result": {}}
+    return last_data
 
 
 # ──────────────────────────────────────────────
@@ -1020,6 +1026,16 @@ class PaperTrader:
             tag = "+" if pnl_usd >= 0 else ""
             print(f"  [PAPER EXIT] {symbol} | {reason} | "
                   f"{tag}${pnl_usd:,.2f} ({pnl_pct:+.1f}%)")
+            shared_state.append_trade("sfp", {
+                "symbol": symbol,
+                "side": pos["side"],
+                "entry_price": pos["entry_price"],
+                "exit_price": price,
+                "pnl_pct": round(pnl_pct, 2),
+                "pnl_usd": round(pnl_usd, 2),
+                "reason": reason,
+                "entry_time": pos.get("entry_unix", 0),
+            })
 
     def display_open_positions(self, tickers):
         """Show current paper positions with live P&L."""
@@ -1728,6 +1744,19 @@ def main():
             paper.update_prices(tickers)
             paper.display_open_positions(tickers)
             paper.display_periodic_summary(tickers)
+            # Publish positions to dashboard
+            price_map = {t["symbol"]: float(t["lastPrice"]) for t in tickers
+                         if "lastPrice" in t}
+            shared_state.write_positions("sfp", [
+                {"symbol": sym, "side": p["side"], "entry_price": p["entry_price"],
+                 "current_price": price_map.get(sym, p["entry_price"]),
+                 "pnl_pct": round(((price_map.get(sym, p["entry_price"]) - p["entry_price"]) / p["entry_price"] * 100)
+                                  if p["side"] == "long" else
+                                  ((p["entry_price"] - price_map.get(sym, p["entry_price"])) / p["entry_price"] * 100), 2),
+                 "entry_time": p.get("entry_unix", 0),
+                 "grade": p.get("grade", "")}
+                for sym, p in paper.positions.items()
+            ])
 
         # Auto-trade SFP signals
         if trading_mode and results:

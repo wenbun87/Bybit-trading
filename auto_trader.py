@@ -54,6 +54,7 @@ from pathlib import Path
 # Import the scanner
 from momentum_scanner import (run_scan, fetch_all_linear_tickers, check_exit_signals,
                               MAINNET_URL, TESTNET_URL)
+import shared_state
 
 # ──────────────────────────────────────────────
 # Config
@@ -68,11 +69,12 @@ DEFAULT_MIN_SCORE = 40          # ELEVATED threshold (catch accumulation earlier
 DEFAULT_INTERVAL_MIN = 15       # scan every 15 minutes
 MAX_TRADES_PER_CYCLE = 2        # max trades per scan cycle
 MAX_TRADES_PER_DAY = 6          # max trades in 24 hours
-MAX_TOTAL_EXPOSURE_USDT = 3000  # stop opening if total exceeds this
+MAX_TOTAL_EXPOSURE_USDT = 25000  # stop opening if total notional exceeds this (10 positions × $2500)
 DEFAULT_LEVERAGE = 10           # 10x leverage
 RE_ENTRY_COOLDOWN_HOURS = 6     # allow re-entry on same symbol after this cooldown
 
 TRADE_LOG_FILE = "trade_log.csv"
+STATE_FILE = Path(__file__).parent / "data" / "auto_trader_state.json"
 
 # ──────────────────────────────────────────────
 # Authenticated API client
@@ -290,6 +292,36 @@ class MomentumPaperTrader:
         self.closed_trades = []   # completed trades
         self.graduated_at = {}    # symbol -> unix timestamp when first seen in Pool A/B
         self.start_time = time.time()
+        self._traded_symbols_ref: dict = {}  # set by caller to persist session traded_symbols
+
+    def save_state(self, traded_symbols: dict | None = None):
+        """Atomically persist positions, closed_trades, graduated_at, and traded_symbols."""
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "positions": self.positions,
+            "closed_trades": self.closed_trades,
+            "graduated_at": self.graduated_at,
+            "traded_symbols": traded_symbols if traded_symbols is not None else self._traded_symbols_ref,
+        }
+        tmp = STATE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(state, indent=2))
+        os.replace(tmp, STATE_FILE)
+
+    def load_state(self, traded_symbols_out: dict | None = None):
+        """Load persisted state from STATE_FILE if it exists. Returns traded_symbols dict."""
+        if not STATE_FILE.exists():
+            return {}
+        try:
+            state = json.loads(STATE_FILE.read_text())
+            self.positions = state.get("positions", {})
+            self.closed_trades = state.get("closed_trades", [])
+            self.graduated_at = state.get("graduated_at", {})
+            print(f"  [State] Loaded {len(self.positions)} open position(s) and "
+                  f"{len(self.closed_trades)} closed trade(s) from {STATE_FILE}")
+            return state.get("traded_symbols", {})
+        except Exception as e:
+            print(f"  [State] WARNING: could not load state from {STATE_FILE}: {e}")
+            return {}
 
     def enter(self, symbol, price, score, signals):
         if symbol in self.positions:
@@ -304,6 +336,7 @@ class MomentumPaperTrader:
         }
         print(f"  [PAPER] LONG {symbol} @ {price:,.6g} | "
               f"Score {score:.0f} | ${self.amount} x{self.leverage}")
+        self.save_state()
 
     def exit(self, symbol, current_price, reason):
         if symbol not in self.positions:
@@ -324,12 +357,29 @@ class MomentumPaperTrader:
         })
         print(f"  [PAPER EXIT] {symbol} @ {current_price:,.6g} | "
               f"P&L: {pnl_pct:+.1f}% (${pnl_usd:+,.2f}) | Held: {held} | {reason}")
+        self.save_state()
+        shared_state.append_trade("accumulation", {
+            "symbol": symbol,
+            "entry_price": pos["entry_price"],
+            "exit_price": current_price,
+            "pnl_pct": round(pnl_pct, 2),
+            "pnl_usd": round(pnl_usd, 2),
+            "reason": reason,
+            "entry_time": pos.get("entry_unix", 0),
+        })
 
-    def update_prices(self, base_url):
-        """Fetch latest prices for all open paper positions."""
+    def update_prices(self, tickers_or_base_url):
+        """Update prices for all open paper positions.
+
+        Accepts either a pre-fetched list of ticker dicts (preferred) or a
+        base_url string (legacy — will fetch tickers internally).
+        """
         if not self.positions:
             return
-        tickers = fetch_all_linear_tickers(base_url)
+        if isinstance(tickers_or_base_url, str):
+            tickers = fetch_all_linear_tickers(tickers_or_base_url)
+        else:
+            tickers = tickers_or_base_url
         price_map = {}
         for t in tickers:
             try:
@@ -581,6 +631,11 @@ def run_auto_trader(args):
     init_trade_log()
 
     paper = None if args.live else MomentumPaperTrader(args.amount, args.leverage)
+    if paper is not None:
+        saved_traded_symbols = paper.load_state()
+        if saved_traded_symbols:
+            session.traded_symbols.update(saved_traded_symbols)
+        paper._traded_symbols_ref = session.traded_symbols
 
     # Display config
     print(f"\n{'='*70}")
@@ -595,7 +650,7 @@ def run_auto_trader(args):
     print(f"  Scan interval:   every {args.interval} minutes")
     print(f"  Max per cycle:   {MAX_TRADES_PER_CYCLE} trades")
     print(f"  Max per day:     {MAX_TRADES_PER_DAY} trades")
-    print(f"  Max exposure:    ${MAX_TOTAL_EXPOSURE_USDT:,}")
+    print(f"  Max exposure:    ${MAX_TOTAL_EXPOSURE_USDT:,} (notional)")
     print(f"  Re-entry after:  {RE_ENTRY_COOLDOWN_HOURS}h cooldown")
     print(f"  Trade log:       {TRADE_LOG_FILE}")
 
@@ -653,6 +708,24 @@ def run_auto_trader(args):
 
                 if entry_price <= 0:
                     continue
+
+                # Hard P&L exit — check BEFORE signals to catch dumps that never reach Pool A/B
+                if paper and sym in paper.positions:
+                    current_price = paper.positions[sym].get("current_price", entry_price)
+                elif args.live:
+                    current_price = 0.0
+                    for p in live_positions:
+                        if p.get("symbol") == sym:
+                            current_price = float(p.get("markPrice", "0") or "0")
+                            break
+                else:
+                    current_price = entry_price
+                if current_price > 0:
+                    pnl = (current_price - entry_price) / entry_price * 100
+                    if pnl <= -15:
+                        # Hard exit — P&L breach, don't wait for signals
+                        paper.exit(sym, current_price, f"HARD EXIT: P&L {pnl:.1f}% breached -15% threshold")
+                        continue
 
                 graduated_since = graduation_tracker.get(sym)
                 exit_info = check_exit_signals(base_url, sym, entry_price, graduated_since)
@@ -797,13 +870,15 @@ def run_auto_trader(args):
                     est_value = float(qty) * price
                     print(f"     Order: BUY {qty} {symbol} (~${est_value:,.2f}) @ {args.leverage}x leverage")
 
+                    sl_price = price * 0.92  # 8% below entry (10x leverage = -80% margin before liquidation)
+
                     if not args.live:
                         print(f"     [DRY-RUN] Would place order")
                         log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                                   score, signals, "dry-run", "N/A", "dry-run")
                         if paper:
                             paper.enter(symbol, price, score, signals)
-                        session.record_trade(symbol, est_value)
+                        session.record_trade(symbol, est_value * args.leverage)
                         trades_this_cycle += 1
                     else:
                         print(f"     Setting leverage to {args.leverage}x...", end=" ")
@@ -812,7 +887,8 @@ def run_auto_trader(args):
 
                         time.sleep(0.3)
                         print(f"     Placing market order...", end=" ")
-                        result = place_market_order(base_url, api_key, api_secret, symbol, qty)
+                        result = place_market_order(base_url, api_key, api_secret, symbol, qty,
+                                                    stop_loss=sl_price)
                         ret_code = result.get("retCode", -1)
                         order_id = result.get("result", {}).get("orderId", "N/A")
 
@@ -820,7 +896,7 @@ def run_auto_trader(args):
                             print(f"FILLED (orderId: {order_id})")
                             log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                                       score, signals, "filled", order_id, "live")
-                            session.record_trade(symbol, est_value)
+                            session.record_trade(symbol, est_value * args.leverage)
                             trades_this_cycle += 1
                         elif ret_code == 10001 and "position idx" in result.get("retMsg", "").lower():
                             print(f"hedge mode detected, retrying...", end=" ")
@@ -830,6 +906,7 @@ def run_auto_trader(args):
                                 "category": "linear", "symbol": symbol,
                                 "side": "Buy", "orderType": "Market", "qty": qty,
                                 "orderLinkId": order_link_id, "positionIdx": 1,
+                                "stopLoss": str(sl_price),
                             }
                             result2 = api_request(base_url, "POST", "/v5/order/create",
                                                   api_key, api_secret, hedge_params)
@@ -838,7 +915,7 @@ def run_auto_trader(args):
                                 print(f"FILLED (orderId: {oid})")
                                 log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                                           score, signals, "filled", oid, "live")
-                                session.record_trade(symbol, est_value)
+                                session.record_trade(symbol, est_value * args.leverage)
                                 trades_this_cycle += 1
                             else:
                                 print(f"FAILED: {result2.get('retMsg')}")
@@ -853,9 +930,19 @@ def run_auto_trader(args):
 
         # P&L display
         if paper:
-            paper.update_prices(base_url)
+            cycle_tickers = fetch_all_linear_tickers(base_url)
+            paper.update_prices(cycle_tickers)
             paper.display_positions()
             paper.display_periodic_summary()
+            # Publish positions to dashboard
+            shared_state.write_positions("accumulation", [
+                {"symbol": sym, "entry_price": p["entry_price"],
+                 "current_price": p.get("current_price", p["entry_price"]),
+                 "pnl_pct": round((p.get("current_price", p["entry_price"]) - p["entry_price"]) / p["entry_price"] * 100, 2),
+                 "entry_time": p.get("entry_unix", 0),
+                 "score": p.get("score", 0)}
+                for sym, p in paper.positions.items()
+            ])
         elif args.live:
             display_live_pnl(base_url, api_key, api_secret)
 
@@ -866,7 +953,31 @@ def run_auto_trader(args):
 
         print(f"\n  Next scan in {args.interval} min... (Ctrl+C to stop)")
         try:
-            time.sleep(args.interval * 60)
+            # Check exits every 3 minutes between full scans
+            exit_check_interval = 180  # 3 minutes
+            total_wait = args.interval * 60
+            waited = 0
+            while waited < total_wait:
+                time.sleep(min(exit_check_interval, total_wait - waited))
+                waited += exit_check_interval
+                if waited < total_wait and paper and paper.positions:
+                    # Quick exit check
+                    print(f"\n  [Exit check — {(total_wait - waited)//60}m until next scan]")
+                    tickers = fetch_all_linear_tickers(base_url)
+                    paper.update_prices(tickers)
+                    for sym in list(paper.positions):
+                        pos = paper.positions[sym]
+                        current_price = pos.get("current_price", pos["entry_price"])
+                        pnl = (current_price - pos["entry_price"]) / pos["entry_price"] * 100
+                        if pnl <= -15:
+                            paper.exit(sym, current_price, f"HARD EXIT: P&L {pnl:.1f}% breached -15%")
+                            continue
+                        exit_info = check_exit_signals(base_url, sym, pos["entry_price"],
+                                                       paper.graduated_at.get(sym))
+                        if exit_info["graduated"] and sym not in paper.graduated_at:
+                            paper.graduated_at[sym] = time.time()
+                        if exit_info["exit"]:
+                            paper.exit(sym, exit_info["current_price"], exit_info["reason"])
         except KeyboardInterrupt:
             if paper:
                 paper.display_summary()

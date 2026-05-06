@@ -94,19 +94,23 @@ def api_get(base_url: str, path: str, params: dict | None = None) -> dict:
         "User-Agent": USER_AGENT,
         "X-Referer": "bybit-skill",
     })
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            _last_call_ts = time.time()
-            _call_count += 1
-            data = json.loads(resp.read())
-            if data.get("retCode") == 10006:
-                _rate_limit_hits += 1
-                wait = 0.5 + (_rate_limit_hits * 0.5)
-                time.sleep(wait)
-                return api_get(base_url, path, params)  # retry
-            return data
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return {"retCode": -1, "result": {}}
+    last_data: dict = {"retCode": -1, "result": {}}
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                _last_call_ts = time.time()
+                _call_count += 1
+                data = json.loads(resp.read())
+                if data.get("retCode") == 10006:
+                    _rate_limit_hits += 1
+                    wait = 0.5 + (_rate_limit_hits * 0.5)
+                    time.sleep(wait)
+                    last_data = data
+                    continue
+                return data
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return {"retCode": -1, "result": {}}
+    return last_data
 
 
 # ──────────────────────────────────────────────
