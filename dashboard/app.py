@@ -5,6 +5,7 @@ Run with: python3 run_dashboard.py
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from pathlib import Path
 from queue import Empty
@@ -14,6 +15,9 @@ from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import bot_manager
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import shared_state
 
 app = FastAPI(title="Trading Bot Dashboard")
 
@@ -53,6 +57,21 @@ async def stop_bot(name: str):
 @app.post("/api/bot/{name}/caffeinate")
 async def toggle_caffeinate(name: str):
     return bot_manager.toggle_caffeinate(name)
+
+
+@app.get("/api/positions")
+async def get_positions():
+    return shared_state.read_all_positions()
+
+
+@app.get("/api/trades")
+async def get_trades(limit: int = 50):
+    return shared_state.read_trade_history(limit=limit)
+
+
+@app.get("/api/stats")
+async def get_stats():
+    return shared_state.get_stats()
 
 
 @app.get("/api/bot/{name}/logs")

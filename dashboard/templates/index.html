@@ -160,6 +160,20 @@
         @media (max-width: 1000px) {
             .grid { grid-template-columns: 1fr; }
         }
+        .stats-bar { display: flex; gap: 20px; justify-content: center; margin-bottom: 20px; flex-wrap: wrap; }
+        .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 20px; text-align: center; min-width: 140px; }
+        .stat-value { font-size: 1.3em; font-weight: 700; }
+        .stat-label { font-size: 0.7em; color: #8b949e; margin-top: 4px; }
+        .pnl-positive { color: #3fb950; }
+        .pnl-negative { color: #f85149; }
+        .positions-panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 20px; max-width: 1600px; margin-left: auto; margin-right: auto; }
+        .positions-panel h2 { font-size: 1em; color: #f0f6fc; margin-bottom: 12px; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.8em; }
+        th { text-align: left; padding: 8px 10px; color: #8b949e; border-bottom: 1px solid #30363d; font-weight: 500; }
+        td { padding: 6px 10px; border-bottom: 1px solid #21262d; }
+        .history-toggle { cursor: pointer; user-select: none; }
+        .history-toggle:hover { color: #58a6ff; }
+        .hidden { display: none; }
     </style>
 </head>
 <body>
@@ -168,6 +182,76 @@
         Live trades OFF = paper trade on real Bybit mainnet data (no API key needed).
         Live trades ON = real money trades via your Bybit API keys.
     </p>
+    <!-- Stats bar -->
+    <div class="stats-bar" id="stats-bar">
+        <div class="stat-card">
+            <div class="stat-value" id="stat-pnl">—</div>
+            <div class="stat-label">Total P&L ($)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="stat-winrate">—</div>
+            <div class="stat-label">Win Rate (%)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="stat-open">—</div>
+            <div class="stat-label">Open Positions</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="stat-total">—</div>
+            <div class="stat-label">Total Trades</div>
+        </div>
+    </div>
+
+    <!-- Open positions panel -->
+    <div class="positions-panel">
+        <h2>Open Positions</h2>
+        <table id="positions-table">
+            <thead>
+                <tr>
+                    <th>Bot</th>
+                    <th>Symbol</th>
+                    <th>Side</th>
+                    <th>Entry Price</th>
+                    <th>Current Price</th>
+                    <th>P&L%</th>
+                    <th>P&L$</th>
+                    <th>Leverage</th>
+                    <th>Time Held</th>
+                </tr>
+            </thead>
+            <tbody id="positions-tbody">
+                <tr><td colspan="9" style="color:#8b949e; text-align:center; padding:16px;">No open positions</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Trade history panel (collapsible) -->
+    <div class="positions-panel">
+        <h2 class="history-toggle" onclick="toggleHistory()">
+            Trade History <span id="history-arrow">&#9660;</span>
+        </h2>
+        <div id="history-body">
+            <table id="history-table">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Bot</th>
+                        <th>Symbol</th>
+                        <th>Side</th>
+                        <th>Entry</th>
+                        <th>Exit</th>
+                        <th>P&L%</th>
+                        <th>P&L$</th>
+                        <th>Duration</th>
+                    </tr>
+                </thead>
+                <tbody id="history-tbody">
+                    <tr><td colspan="9" style="color:#8b949e; text-align:center; padding:16px;">No trade history</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
     <div class="grid">
         <div class="bot-panel" id="panel-auto_trader">
             <div class="bot-header">
@@ -305,9 +389,117 @@
             });
         }
 
+        // ── Positions & Stats ──────────────────────────────────────────────
+
+        function fmtHeld(seconds) {
+            if (!seconds || seconds < 0) return '—';
+            const m = Math.floor(seconds / 60);
+            const h = Math.floor(m / 60);
+            return h > 0 ? `${h}h ${m % 60}m` : `${m}m`;
+        }
+
+        function fmtPnl(val, suffix) {
+            if (val === undefined || val === null) return '—';
+            const cls = val > 0 ? 'pnl-positive' : (val < 0 ? 'pnl-negative' : '');
+            const sign = val > 0 ? '+' : '';
+            return `<span class="${cls}">${sign}${val.toFixed(2)}${suffix}</span>`;
+        }
+
+        function refreshPositions() {
+            Promise.all([
+                fetch('/api/positions').then(r => r.json()),
+                fetch('/api/stats').then(r => r.json()),
+            ]).then(([posData, stats]) => {
+                // Update stats bar
+                const pnlEl = document.getElementById('stat-pnl');
+                const pnl = stats.total_pnl_usd || 0;
+                pnlEl.innerHTML = fmtPnl(pnl, '');
+                document.getElementById('stat-winrate').textContent =
+                    stats.win_rate !== undefined ? stats.win_rate.toFixed(1) + '%' : '—';
+                document.getElementById('stat-total').textContent =
+                    stats.total_trades !== undefined ? stats.total_trades : '—';
+
+                // Count open positions
+                let openCount = 0;
+                const rows = [];
+                const now = Date.now() / 1000;
+
+                for (const [botName, botData] of Object.entries(posData)) {
+                    const positions = botData.positions || [];
+                    openCount += positions.length;
+                    for (const p of positions) {
+                        const pnlPct = p.pnl_pct !== undefined ? p.pnl_pct : null;
+                        const pnlUsd = p.pnl_usd !== undefined ? p.pnl_usd : null;
+                        const heldSec = p.entry_time ? now - p.entry_time : null;
+                        rows.push(`<tr>
+                            <td>${botName}</td>
+                            <td>${p.symbol || '—'}</td>
+                            <td>${p.side || '—'}</td>
+                            <td>${p.entry_price !== undefined ? p.entry_price.toFixed(4) : '—'}</td>
+                            <td>${p.current_price !== undefined ? p.current_price.toFixed(4) : '—'}</td>
+                            <td>${pnlPct !== null ? fmtPnl(pnlPct, '%') : '—'}</td>
+                            <td>${pnlUsd !== null ? fmtPnl(pnlUsd, '') : '—'}</td>
+                            <td>${p.leverage !== undefined ? p.leverage + 'x' : '—'}</td>
+                            <td>${fmtHeld(heldSec)}</td>
+                        </tr>`);
+                    }
+                }
+
+                document.getElementById('stat-open').textContent = openCount;
+                const tbody = document.getElementById('positions-tbody');
+                tbody.innerHTML = rows.length
+                    ? rows.join('')
+                    : '<tr><td colspan="9" style="color:#8b949e; text-align:center; padding:16px;">No open positions</td></tr>';
+            }).catch(() => {});
+        }
+
+        function refreshTrades() {
+            fetch('/api/trades?limit=20').then(r => r.json()).then(trades => {
+                const tbody = document.getElementById('history-tbody');
+                if (!trades || trades.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="9" style="color:#8b949e; text-align:center; padding:16px;">No trade history</td></tr>';
+                    return;
+                }
+                // Newest first
+                const sorted = trades.slice().reverse();
+                const rows = sorted.map(t => {
+                    const date = t.closed_at
+                        ? new Date(t.closed_at * 1000).toLocaleString()
+                        : '—';
+                    const dur = (t.entry_time && t.closed_at)
+                        ? fmtHeld(t.closed_at - t.entry_time) : '—';
+                    const pnlPct = t.pnl_pct !== undefined ? t.pnl_pct : null;
+                    const pnlUsd = t.pnl_usd !== undefined ? t.pnl_usd : null;
+                    return `<tr>
+                        <td>${date}</td>
+                        <td>${t.bot || '—'}</td>
+                        <td>${t.symbol || '—'}</td>
+                        <td>${t.side || '—'}</td>
+                        <td>${t.entry_price !== undefined ? t.entry_price.toFixed(4) : '—'}</td>
+                        <td>${t.exit_price !== undefined ? t.exit_price.toFixed(4) : '—'}</td>
+                        <td>${pnlPct !== null ? fmtPnl(pnlPct, '%') : '—'}</td>
+                        <td>${pnlUsd !== null ? fmtPnl(pnlUsd, '') : '—'}</td>
+                        <td>${dur}</td>
+                    </tr>`;
+                });
+                tbody.innerHTML = rows.join('');
+            }).catch(() => {});
+        }
+
+        function toggleHistory() {
+            const body = document.getElementById('history-body');
+            const arrow = document.getElementById('history-arrow');
+            body.classList.toggle('hidden');
+            arrow.innerHTML = body.classList.contains('hidden') ? '&#9654;' : '&#9660;';
+        }
+
         // Init
         refreshStatus();
         statusInterval = setInterval(refreshStatus, 5000);
+        refreshPositions();
+        setInterval(refreshPositions, 5000);
+        refreshTrades();
+        setInterval(refreshTrades, 30000);
         // Connect logs for any running bots
         fetch('/api/status').then(r => r.json()).then(bots => {
             bots.forEach(bot => {
