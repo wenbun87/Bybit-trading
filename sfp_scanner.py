@@ -1753,6 +1753,8 @@ def main():
                  "pnl_pct": round(((price_map.get(sym, p["entry_price"]) - p["entry_price"]) / p["entry_price"] * 100)
                                   if p["side"] == "long" else
                                   ((p["entry_price"] - price_map.get(sym, p["entry_price"])) / p["entry_price"] * 100), 2),
+                 "size_usdt": paper.amount,
+                 "leverage": paper.leverage,
                  "entry_time": p.get("entry_unix", 0),
                  "grade": p.get("grade", "")}
                 for sym, p in paper.positions.items()

@@ -211,6 +211,7 @@
                     <th>Bot</th>
                     <th>Symbol</th>
                     <th>Side</th>
+                    <th>Size</th>
                     <th>Entry Price</th>
                     <th>Current Price</th>
                     <th>P&L%</th>
@@ -429,17 +430,23 @@
                     openCount += positions.length;
                     for (const p of positions) {
                         const pnlPct = p.pnl_pct !== undefined ? p.pnl_pct : null;
-                        const pnlUsd = p.pnl_usd !== undefined ? p.pnl_usd : null;
+                        const sizeUsdt = p.size_usdt !== undefined ? p.size_usdt : null;
+                        const pnlUsd = sizeUsdt !== null && pnlPct !== null
+                            ? pnlPct / 100 * sizeUsdt : null;
                         const heldSec = p.entry_time ? now - p.entry_time : null;
+                        const lev = p.leverage || '—';
+                        const sizeStr = sizeUsdt !== null
+                            ? `$${sizeUsdt.toLocaleString()}` : '—';
                         rows.push(`<tr>
                             <td>${botName}</td>
                             <td>${p.symbol || '—'}</td>
-                            <td>${p.side || '—'}</td>
+                            <td>${(p.side || 'long').toUpperCase()}</td>
+                            <td>${sizeStr}</td>
                             <td>${p.entry_price !== undefined ? p.entry_price.toFixed(4) : '—'}</td>
                             <td>${p.current_price !== undefined ? p.current_price.toFixed(4) : '—'}</td>
                             <td>${pnlPct !== null ? fmtPnl(pnlPct, '%') : '—'}</td>
                             <td>${pnlUsd !== null ? fmtPnl(pnlUsd, '') : '—'}</td>
-                            <td>${p.leverage !== undefined ? p.leverage + 'x' : '—'}</td>
+                            <td>${lev !== '—' ? lev + 'x' : '—'}</td>
                             <td>${fmtHeld(heldSec)}</td>
                         </tr>`);
                     }
@@ -449,7 +456,7 @@
                 const tbody = document.getElementById('positions-tbody');
                 tbody.innerHTML = rows.length
                     ? rows.join('')
-                    : '<tr><td colspan="9" style="color:#8b949e; text-align:center; padding:16px;">No open positions</td></tr>';
+                    : '<tr><td colspan="10" style="color:#8b949e; text-align:center; padding:16px;">No open positions</td></tr>';
             }).catch(() => {});
         }
 
@@ -474,7 +481,7 @@
                         <td>${date}</td>
                         <td>${t.bot || '—'}</td>
                         <td>${t.symbol || '—'}</td>
-                        <td>${t.side || '—'}</td>
+                        <td>${(t.side || 'long').toUpperCase()}</td>
                         <td>${t.entry_price !== undefined ? t.entry_price.toFixed(4) : '—'}</td>
                         <td>${t.exit_price !== undefined ? t.exit_price.toFixed(4) : '—'}</td>
                         <td>${pnlPct !== null ? fmtPnl(pnlPct, '%') : '—'}</td>

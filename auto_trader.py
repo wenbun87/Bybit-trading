@@ -936,9 +936,12 @@ def run_auto_trader(args):
             paper.display_periodic_summary()
             # Publish positions to dashboard
             shared_state.write_positions("accumulation", [
-                {"symbol": sym, "entry_price": p["entry_price"],
+                {"symbol": sym, "side": "long",
+                 "entry_price": p["entry_price"],
                  "current_price": p.get("current_price", p["entry_price"]),
                  "pnl_pct": round((p.get("current_price", p["entry_price"]) - p["entry_price"]) / p["entry_price"] * 100, 2),
+                 "size_usdt": paper.amount,
+                 "leverage": paper.leverage,
                  "entry_time": p.get("entry_unix", 0),
                  "score": p.get("score", 0)}
                 for sym, p in paper.positions.items()
