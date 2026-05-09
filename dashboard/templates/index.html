@@ -431,10 +431,11 @@
                     for (const p of positions) {
                         const pnlPct = p.pnl_pct !== undefined ? p.pnl_pct : null;
                         const sizeUsdt = p.size_usdt !== undefined ? p.size_usdt : null;
+                        const lev = p.leverage || 1;
                         const pnlUsd = sizeUsdt !== null && pnlPct !== null
-                            ? pnlPct / 100 * sizeUsdt : null;
+                            ? pnlPct / 100 * sizeUsdt * lev : null;
+                        const leveragedPnlPct = pnlPct !== null ? pnlPct * lev : null;
                         const heldSec = p.entry_time ? now - p.entry_time : null;
-                        const lev = p.leverage || '—';
                         const sizeStr = sizeUsdt !== null
                             ? `$${sizeUsdt.toLocaleString()}` : '—';
                         rows.push(`<tr>
@@ -444,9 +445,9 @@
                             <td>${sizeStr}</td>
                             <td>${p.entry_price !== undefined ? p.entry_price.toFixed(4) : '—'}</td>
                             <td>${p.current_price !== undefined ? p.current_price.toFixed(4) : '—'}</td>
-                            <td>${pnlPct !== null ? fmtPnl(pnlPct, '%') : '—'}</td>
+                            <td>${leveragedPnlPct !== null ? fmtPnl(leveragedPnlPct, '%') : '—'}</td>
                             <td>${pnlUsd !== null ? fmtPnl(pnlUsd, '') : '—'}</td>
-                            <td>${lev !== '—' ? lev + 'x' : '—'}</td>
+                            <td>${lev}x</td>
                             <td>${fmtHeld(heldSec)}</td>
                         </tr>`);
                     }
