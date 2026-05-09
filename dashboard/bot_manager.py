@@ -175,7 +175,7 @@ def _start_caffeinate(state: BotState):
         return
     try:
         state.caffeinate_proc = subprocess.Popen(
-            ["caffeinate", "-dims", "-w", str(state.process.pid)],
+            ["caffeinate", "-i", "-w", str(state.process.pid)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

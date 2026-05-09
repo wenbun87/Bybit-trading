@@ -7,29 +7,143 @@
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace;
-            background: #0d1117;
-            color: #c9d1d9;
-            padding: 20px;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: #13171e;
+            color: #b8c0cc;
+            padding: 24px 28px;
             min-height: 100vh;
         }
-        h1 {
+        .dashboard-header {
             text-align: center;
-            color: #58a6ff;
-            margin-bottom: 20px;
-            font-size: 1.4em;
+            margin-bottom: 28px;
         }
+        .dashboard-header h1 {
+            color: #e2e6ec;
+            font-size: 1.3em;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }
+        .dashboard-header .subtitle {
+            color: #6b7280;
+            font-size: 0.72em;
+            margin-top: 6px;
+            line-height: 1.5;
+        }
+
+        /* Stats bar */
+        .stats-bar {
+            display: flex;
+            gap: 14px;
+            justify-content: center;
+            margin-bottom: 22px;
+            flex-wrap: wrap;
+        }
+        .stat-card {
+            background: #1a1f2b;
+            border: 1px solid #262d3a;
+            border-radius: 10px;
+            padding: 14px 24px;
+            text-align: center;
+            min-width: 135px;
+            transition: border-color 0.2s;
+        }
+        .stat-card:hover {
+            border-color: #3a4560;
+        }
+        .stat-value {
+            font-size: 1.3em;
+            font-weight: 700;
+            color: #e2e6ec;
+            font-variant-numeric: tabular-nums;
+        }
+        .stat-label {
+            font-size: 0.68em;
+            color: #6b7280;
+            margin-top: 5px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .pnl-positive { color: #5ec4a0; }
+        .pnl-negative { color: #e08888; }
+
+        /* Panels */
+        .panel {
+            background: #1a1f2b;
+            border: 1px solid #262d3a;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 18px;
+            max-width: 1600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .panel h2 {
+            font-size: 0.88em;
+            color: #d0d5de;
+            margin-bottom: 14px;
+            font-weight: 600;
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.78em;
+        }
+        th {
+            text-align: left;
+            padding: 8px 12px;
+            color: #6b7280;
+            border-bottom: 1px solid #262d3a;
+            font-weight: 500;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+        td {
+            padding: 8px 12px;
+            border-bottom: 1px solid #1f2533;
+            color: #b8c0cc;
+        }
+        tr:hover td {
+            background: #1e2435;
+        }
+        .empty-row td {
+            color: #4b5563;
+            text-align: center;
+            padding: 20px;
+            font-style: italic;
+        }
+        .empty-row:hover td { background: none; }
+
+        /* History toggle */
+        .history-toggle {
+            cursor: pointer;
+            user-select: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .history-toggle:hover { color: #8ba3c7; }
+        .history-arrow {
+            font-size: 0.7em;
+            color: #6b7280;
+            transition: transform 0.2s;
+        }
+        .hidden { display: none; }
+
+        /* Bot grid */
         .grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 20px;
+            gap: 18px;
             max-width: 1600px;
             margin: 0 auto;
         }
         .bot-panel {
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 8px;
+            background: #1a1f2b;
+            border: 1px solid #262d3a;
+            border-radius: 10px;
             padding: 20px;
             display: flex;
             flex-direction: column;
@@ -38,35 +152,38 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 15px;
+            margin-bottom: 14px;
         }
         .bot-name {
-            font-size: 1.1em;
+            font-size: 0.95em;
             font-weight: 600;
-            color: #f0f6fc;
+            color: #e2e6ec;
         }
         .status-badge {
             padding: 4px 10px;
-            border-radius: 12px;
-            font-size: 0.75em;
+            border-radius: 10px;
+            font-size: 0.68em;
             font-weight: 600;
             text-transform: uppercase;
+            letter-spacing: 0.04em;
         }
         .status-running {
-            background: #0d419d;
-            color: #58a6ff;
-            border: 1px solid #1f6feb;
+            background: rgba(94, 196, 160, 0.12);
+            color: #5ec4a0;
+            border: 1px solid rgba(94, 196, 160, 0.25);
         }
         .status-stopped {
-            background: #3d1f1f;
-            color: #f85149;
-            border: 1px solid #da3633;
+            background: rgba(107, 114, 128, 0.12);
+            color: #6b7280;
+            border: 1px solid rgba(107, 114, 128, 0.25);
         }
+
+        /* Controls */
         .controls {
             display: flex;
             gap: 10px;
             flex-wrap: wrap;
-            margin-bottom: 15px;
+            margin-bottom: 14px;
             align-items: center;
         }
         .control-group {
@@ -75,113 +192,118 @@
             gap: 6px;
         }
         .control-group label {
-            font-size: 0.8em;
-            color: #8b949e;
+            font-size: 0.75em;
+            color: #6b7280;
         }
         input[type="number"] {
             width: 80px;
             padding: 6px 8px;
-            background: #0d1117;
-            border: 1px solid #30363d;
-            border-radius: 4px;
-            color: #c9d1d9;
-            font-size: 0.85em;
+            background: #13171e;
+            border: 1px solid #2a3140;
+            border-radius: 6px;
+            color: #b8c0cc;
+            font-size: 0.82em;
             font-family: inherit;
+            transition: border-color 0.15s;
         }
         input[type="number"]:focus {
-            border-color: #58a6ff;
+            border-color: #5b7a9d;
             outline: none;
         }
         .btn {
             padding: 6px 14px;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            font-size: 0.8em;
+            border: 1px solid #2a3140;
+            border-radius: 7px;
+            font-size: 0.78em;
             font-weight: 500;
             cursor: pointer;
             font-family: inherit;
             transition: all 0.15s;
         }
-        .btn:hover { opacity: 0.85; }
+        .btn:hover { filter: brightness(1.1); }
         .btn:active { transform: scale(0.97); }
         .btn-start {
-            background: #238636;
-            color: #fff;
-            border-color: #2ea043;
+            background: rgba(94, 196, 160, 0.15);
+            color: #5ec4a0;
+            border-color: rgba(94, 196, 160, 0.3);
         }
         .btn-stop {
-            background: #da3633;
-            color: #fff;
-            border-color: #f85149;
+            background: rgba(224, 136, 136, 0.12);
+            color: #e08888;
+            border-color: rgba(224, 136, 136, 0.25);
         }
         .btn-caff {
-            background: #1f2937;
-            color: #c9d1d9;
+            background: rgba(107, 114, 128, 0.1);
+            color: #7c8493;
         }
         .btn-caff.active {
-            background: #7c3aed;
-            color: #fff;
-            border-color: #8b5cf6;
+            background: rgba(139, 163, 199, 0.15);
+            color: #8ba3c7;
+            border-color: rgba(139, 163, 199, 0.3);
         }
         .btn:disabled {
-            opacity: 0.4;
+            opacity: 0.35;
             cursor: not-allowed;
         }
         .checkbox-group {
             display: flex;
             align-items: center;
-            gap: 4px;
-            font-size: 0.8em;
-            color: #8b949e;
+            gap: 5px;
+            font-size: 0.75em;
+            color: #6b7280;
         }
-        .checkbox-group input { margin: 0; }
+        .checkbox-group input {
+            margin: 0;
+            accent-color: #5b7a9d;
+        }
+
+        /* Logs */
         .log-container {
             flex: 1;
-            min-height: 400px;
-            max-height: 60vh;
-            background: #010409;
-            border: 1px solid #21262d;
-            border-radius: 6px;
+            min-height: 380px;
+            max-height: 55vh;
+            background: #10141a;
+            border: 1px solid #1f2533;
+            border-radius: 8px;
             overflow-y: auto;
-            padding: 10px;
-            font-size: 0.72em;
-            line-height: 1.5;
+            padding: 12px;
+            font-size: 0.7em;
+            font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Menlo', monospace;
+            line-height: 1.55;
             white-space: pre-wrap;
             word-break: break-all;
         }
-        .log-line { color: #8b949e; }
-        .log-line:has(.highlight) { color: #58a6ff; }
+        .log-line { color: #6b7280; }
         .uptime {
-            font-size: 0.75em;
-            color: #8b949e;
+            font-size: 0.7em;
+            color: #4b5563;
             margin-top: 8px;
             text-align: right;
         }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb {
+            background: #2a3140;
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover { background: #3a4560; }
+
         @media (max-width: 1000px) {
             .grid { grid-template-columns: 1fr; }
         }
-        .stats-bar { display: flex; gap: 20px; justify-content: center; margin-bottom: 20px; flex-wrap: wrap; }
-        .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 20px; text-align: center; min-width: 140px; }
-        .stat-value { font-size: 1.3em; font-weight: 700; }
-        .stat-label { font-size: 0.7em; color: #8b949e; margin-top: 4px; }
-        .pnl-positive { color: #3fb950; }
-        .pnl-negative { color: #f85149; }
-        .positions-panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 20px; max-width: 1600px; margin-left: auto; margin-right: auto; }
-        .positions-panel h2 { font-size: 1em; color: #f0f6fc; margin-bottom: 12px; }
-        table { width: 100%; border-collapse: collapse; font-size: 0.8em; }
-        th { text-align: left; padding: 8px 10px; color: #8b949e; border-bottom: 1px solid #30363d; font-weight: 500; }
-        td { padding: 6px 10px; border-bottom: 1px solid #21262d; }
-        .history-toggle { cursor: pointer; user-select: none; }
-        .history-toggle:hover { color: #58a6ff; }
-        .hidden { display: none; }
     </style>
 </head>
 <body>
-    <h1>Trading Bot Dashboard</h1>
-    <p style="text-align:center; color:#8b949e; font-size:0.78em; margin-bottom:18px;">
-        Live trades OFF = paper trade on real Bybit mainnet data (no API key needed).
-        Live trades ON = real money trades via your Bybit API keys.
-    </p>
+    <div class="dashboard-header">
+        <h1>Trading Dashboard</h1>
+        <div class="subtitle">
+            Live trades OFF = paper trading on real Bybit data &nbsp;&middot;&nbsp;
+            Live trades ON = real orders via API keys
+        </div>
+    </div>
+
     <!-- Stats bar -->
     <div class="stats-bar" id="stats-bar">
         <div class="stat-card">
@@ -189,8 +311,12 @@
             <div class="stat-label">Total P&L ($)</div>
         </div>
         <div class="stat-card">
+            <div class="stat-value" id="stat-pnl-pct">—</div>
+            <div class="stat-label">Avg P&L (%)</div>
+        </div>
+        <div class="stat-card">
             <div class="stat-value" id="stat-winrate">—</div>
-            <div class="stat-label">Win Rate (%)</div>
+            <div class="stat-label">Win Rate</div>
         </div>
         <div class="stat-card">
             <div class="stat-value" id="stat-open">—</div>
@@ -203,7 +329,7 @@
     </div>
 
     <!-- Open positions panel -->
-    <div class="positions-panel">
+    <div class="panel">
         <h2>Open Positions</h2>
         <table id="positions-table">
             <thead>
@@ -212,24 +338,24 @@
                     <th>Symbol</th>
                     <th>Side</th>
                     <th>Size</th>
-                    <th>Entry Price</th>
-                    <th>Current Price</th>
-                    <th>P&L%</th>
-                    <th>P&L$</th>
+                    <th>Entry</th>
+                    <th>Current</th>
+                    <th>P&L %</th>
+                    <th>P&L $</th>
                     <th>Leverage</th>
-                    <th>Time Held</th>
+                    <th>Held</th>
                 </tr>
             </thead>
             <tbody id="positions-tbody">
-                <tr><td colspan="9" style="color:#8b949e; text-align:center; padding:16px;">No open positions</td></tr>
+                <tr class="empty-row"><td colspan="10">No open positions</td></tr>
             </tbody>
         </table>
     </div>
 
     <!-- Trade history panel (collapsible) -->
-    <div class="positions-panel">
+    <div class="panel">
         <h2 class="history-toggle" onclick="toggleHistory()">
-            Trade History <span id="history-arrow">&#9660;</span>
+            Trade History <span class="history-arrow" id="history-arrow">&#9660;</span>
         </h2>
         <div id="history-body">
             <table id="history-table">
@@ -241,13 +367,13 @@
                         <th>Side</th>
                         <th>Entry</th>
                         <th>Exit</th>
-                        <th>P&L%</th>
-                        <th>P&L$</th>
+                        <th>P&L %</th>
+                        <th>P&L $</th>
                         <th>Duration</th>
                     </tr>
                 </thead>
                 <tbody id="history-tbody">
-                    <tr><td colspan="9" style="color:#8b949e; text-align:center; padding:16px;">No trade history</td></tr>
+                    <tr class="empty-row"><td colspan="9">No trade history</td></tr>
                 </tbody>
             </table>
         </div>
@@ -266,11 +392,12 @@
                 </div>
                 <div class="checkbox-group">
                     <input type="checkbox" id="live-auto_trader">
-                    <label for="live-auto_trader" title="When OFF: paper trade on real mainnet data. When ON: real money trades.">Live trades</label>
+                    <label for="live-auto_trader" title="OFF = paper trades, ON = real money">Live trades</label>
                 </div>
                 <button class="btn btn-start" onclick="startBot('auto_trader')">Start</button>
                 <button class="btn btn-stop" onclick="stopBot('auto_trader')">Stop</button>
-                <button class="btn btn-caff" id="caff-auto_trader" onclick="toggleCaff('auto_trader')">Caffeinate</button>
+                <button class="btn btn-caff" id="caff-auto_trader" onclick="toggleCaff('auto_trader')"
+                    title="Prevent system idle sleep while bot runs (screen can still sleep)">Keep Awake</button>
             </div>
             <div class="log-container" id="logs-auto_trader"></div>
             <div class="uptime" id="uptime-auto_trader"></div>
@@ -288,11 +415,12 @@
                 </div>
                 <div class="checkbox-group">
                     <input type="checkbox" id="live-sfp_scanner">
-                    <label for="live-sfp_scanner" title="When OFF: paper trade on real mainnet data. When ON: real money trades.">Live trades</label>
+                    <label for="live-sfp_scanner" title="OFF = paper trades, ON = real money">Live trades</label>
                 </div>
                 <button class="btn btn-start" onclick="startBot('sfp_scanner')">Start</button>
                 <button class="btn btn-stop" onclick="stopBot('sfp_scanner')">Stop</button>
-                <button class="btn btn-caff" id="caff-sfp_scanner" onclick="toggleCaff('sfp_scanner')">Caffeinate</button>
+                <button class="btn btn-caff" id="caff-sfp_scanner" onclick="toggleCaff('sfp_scanner')"
+                    title="Prevent system idle sleep while bot runs (screen can still sleep)">Keep Awake</button>
             </div>
             <div class="log-container" id="logs-sfp_scanner"></div>
             <div class="uptime" id="uptime-sfp_scanner"></div>
@@ -353,11 +481,7 @@
                 line.className = 'log-line';
                 line.textContent = event.data;
                 logEl.appendChild(line);
-
-                // Auto-scroll
                 logEl.scrollTop = logEl.scrollHeight;
-
-                // Limit DOM nodes
                 while (logEl.children.length > 800) {
                     logEl.removeChild(logEl.firstChild);
                 }
@@ -390,12 +514,14 @@
             });
         }
 
-        // ── Positions & Stats ──────────────────────────────────────────────
+        // ── Positions & Stats ──
 
         function fmtHeld(seconds) {
             if (!seconds || seconds < 0) return '—';
             const m = Math.floor(seconds / 60);
             const h = Math.floor(m / 60);
+            const d = Math.floor(h / 24);
+            if (d > 0) return `${d}d ${h % 24}h`;
             return h > 0 ? `${h}h ${m % 60}m` : `${m}m`;
         }
 
@@ -412,15 +538,16 @@
                 fetch('/api/stats').then(r => r.json()),
             ]).then(([posData, stats]) => {
                 // Update stats bar
-                const pnlEl = document.getElementById('stat-pnl');
                 const pnl = stats.total_pnl_usd || 0;
-                pnlEl.innerHTML = fmtPnl(pnl, '');
+                document.getElementById('stat-pnl').innerHTML = fmtPnl(pnl, '');
+                document.getElementById('stat-pnl-pct').innerHTML =
+                    stats.avg_pnl_pct !== undefined ? fmtPnl(stats.avg_pnl_pct, '%') : '—';
                 document.getElementById('stat-winrate').textContent =
                     stats.win_rate !== undefined ? stats.win_rate.toFixed(1) + '%' : '—';
                 document.getElementById('stat-total').textContent =
                     stats.total_trades !== undefined ? stats.total_trades : '—';
 
-                // Count open positions
+                // Build positions rows
                 let openCount = 0;
                 const rows = [];
                 const now = Date.now() / 1000;
@@ -440,7 +567,7 @@
                             ? `$${sizeUsdt.toLocaleString()}` : '—';
                         rows.push(`<tr>
                             <td>${botName}</td>
-                            <td>${p.symbol || '—'}</td>
+                            <td style="color:#d0d5de; font-weight:500">${p.symbol || '—'}</td>
                             <td>${(p.side || 'long').toUpperCase()}</td>
                             <td>${sizeStr}</td>
                             <td>${p.entry_price !== undefined ? p.entry_price.toFixed(4) : '—'}</td>
@@ -457,7 +584,7 @@
                 const tbody = document.getElementById('positions-tbody');
                 tbody.innerHTML = rows.length
                     ? rows.join('')
-                    : '<tr><td colspan="10" style="color:#8b949e; text-align:center; padding:16px;">No open positions</td></tr>';
+                    : '<tr class="empty-row"><td colspan="10">No open positions</td></tr>';
             }).catch(() => {});
         }
 
@@ -465,10 +592,9 @@
             fetch('/api/trades?limit=20').then(r => r.json()).then(trades => {
                 const tbody = document.getElementById('history-tbody');
                 if (!trades || trades.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="9" style="color:#8b949e; text-align:center; padding:16px;">No trade history</td></tr>';
+                    tbody.innerHTML = '<tr class="empty-row"><td colspan="9">No trade history</td></tr>';
                     return;
                 }
-                // Newest first
                 const sorted = trades.slice().reverse();
                 const rows = sorted.map(t => {
                     const date = t.closed_at
@@ -481,7 +607,7 @@
                     return `<tr>
                         <td>${date}</td>
                         <td>${t.bot || '—'}</td>
-                        <td>${t.symbol || '—'}</td>
+                        <td style="color:#d0d5de; font-weight:500">${t.symbol || '—'}</td>
                         <td>${(t.side || 'long').toUpperCase()}</td>
                         <td>${t.entry_price !== undefined ? t.entry_price.toFixed(4) : '—'}</td>
                         <td>${t.exit_price !== undefined ? t.exit_price.toFixed(4) : '—'}</td>
@@ -508,7 +634,6 @@
         setInterval(refreshPositions, 5000);
         refreshTrades();
         setInterval(refreshTrades, 30000);
-        // Connect logs for any running bots
         fetch('/api/status').then(r => r.json()).then(bots => {
             bots.forEach(bot => {
                 if (bot.status === 'running') connectLogs(bot.name);
