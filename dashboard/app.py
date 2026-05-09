@@ -43,8 +43,12 @@ async def start_bot(name: str, request: Request):
     body = await request.json()
     amount = float(body.get("amount", 250))
     live = bool(body.get("live", False))
+    account_balance = float(body.get("account_balance", 500))
+    max_exposure_mult = float(body.get("max_exposure_mult", 5))
     extra_args = body.get("extra_args", [])
     result = bot_manager.start_bot(name, amount=amount, live=live,
+                                   account_balance=account_balance,
+                                   max_exposure_mult=max_exposure_mult,
                                    extra_args=extra_args)
     return result
 

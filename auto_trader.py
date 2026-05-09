@@ -64,14 +64,39 @@ USER_AGENT = "bybit-skill/1.2.3"
 RECV_WINDOW = "5000"
 
 # Safety defaults
-DEFAULT_AMOUNT_USDT = 250       # $ per trade
+DEFAULT_AMOUNT_USDT = 250       # $ per trade (fixed mode, overridden by score-based)
+DEFAULT_ACCOUNT_BALANCE = 500   # Account balance for score-based sizing
+DEFAULT_MAX_EXPOSURE_MULT = 5   # Max total exposure = balance × this (with leverage)
 DEFAULT_MIN_SCORE = 40          # ELEVATED threshold (catch accumulation earlier)
 DEFAULT_INTERVAL_MIN = 15       # scan every 15 minutes
 MAX_TRADES_PER_CYCLE = 2        # max trades per scan cycle
 MAX_TRADES_PER_DAY = 6          # max trades in 24 hours
-MAX_TOTAL_EXPOSURE_USDT = 25000  # stop opening if total notional exceeds this (10 positions × $2500)
 DEFAULT_LEVERAGE = 10           # 10x leverage
 RE_ENTRY_COOLDOWN_HOURS = 6     # allow re-entry on same symbol after this cooldown
+
+# Score-based sizing tiers: (min_score, multiplier_of_base)
+SCORE_SIZE_TIERS = [
+    (80, 2.0),   # Strong signal → 2x base
+    (60, 1.5),   # Good signal → 1.5x base
+    (40, 1.0),   # Moderate signal → 1x base
+    (25, 0.5),   # Marginal signal → 0.5x base
+]
+
+
+def compute_trade_size(score: float, account_balance: float, max_exposure: float,
+                       current_exposure: float, leverage: int) -> float:
+    """Compute trade size (margin) based on signal score and account limits."""
+    base = account_balance / 10
+    multiplier = 0.5
+    for min_score, mult in SCORE_SIZE_TIERS:
+        if score >= min_score:
+            multiplier = mult
+            break
+    size = base * multiplier
+    remaining = max(0, (max_exposure - current_exposure) / leverage)
+    size = min(size, remaining)
+    size = max(size, 0)
+    return round(size, 2)
 
 TRADE_LOG_FILE = "trade_log.csv"
 STATE_FILE = Path(__file__).parent / "data" / "auto_trader_state.json"
@@ -323,19 +348,21 @@ class MomentumPaperTrader:
             print(f"  [State] WARNING: could not load state from {STATE_FILE}: {e}")
             return {}
 
-    def enter(self, symbol, price, score, signals):
+    def enter(self, symbol, price, score, signals, trade_size=None):
         if symbol in self.positions:
             return
-        qty = self.amount / price
+        size = trade_size if trade_size is not None else self.amount
+        qty = size / price
         self.positions[symbol] = {
             "entry_price": price,
             "qty": qty,
+            "trade_size": size,
             "entry_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             "entry_unix": time.time(),
             "score": score,
         }
         print(f"  [PAPER] LONG {symbol} @ {price:,.6g} | "
-              f"Score {score:.0f} | ${self.amount} x{self.leverage}")
+              f"Score {score:.0f} | ${size:.0f} x{self.leverage}")
         self.save_state()
 
     def exit(self, symbol, current_price, reason):
@@ -343,8 +370,9 @@ class MomentumPaperTrader:
             return
         pos = self.positions.pop(symbol)
         entry = pos["entry_price"]
+        size = pos.get("trade_size", self.amount)
         pnl_pct = (current_price - entry) / entry * 100
-        pnl_usd = pnl_pct / 100 * self.amount
+        pnl_usd = pnl_pct / 100 * size
         held = self._format_elapsed(time.time() - pos.get("entry_unix", time.time()))
         self.closed_trades.append({
             **pos,
@@ -364,6 +392,7 @@ class MomentumPaperTrader:
             "exit_price": current_price,
             "pnl_pct": round(pnl_pct, 2),
             "pnl_usd": round(pnl_usd, 2),
+            "size_usdt": size,
             "reason": reason,
             "entry_time": pos.get("entry_unix", 0),
         })
@@ -407,28 +436,29 @@ class MomentumPaperTrader:
     def display_positions(self):
         if not self.positions:
             return
-        print(f"\n  {'─'*115}")
+        print(f"\n  {'─'*125}")
         print(f"  PAPER POSITIONS ({len(self.positions)} open)")
-        print(f"  {'─'*115}")
-        print(f"  {'Symbol':<14} {'Score':>6} {'Entry':>12} {'Current':>12}"
+        print(f"  {'─'*125}")
+        print(f"  {'Symbol':<14} {'Score':>6} {'Size':>8} {'Entry':>12} {'Current':>12}"
               f"  {'P&L%':>8}  {'P&L$':>10}  {'Entered':<22}  {'Held':>6}")
-        print(f"  {'─'*115}")
+        print(f"  {'─'*125}")
 
         total_pnl = 0
         now = time.time()
         for symbol, pos in sorted(self.positions.items()):
             price = pos.get("current_price", pos["entry_price"])
             entry = pos["entry_price"]
+            size = pos.get("trade_size", self.amount)
             pnl_pct = (price - entry) / entry * 100
-            pnl_usd = pnl_pct / 100 * self.amount
+            pnl_usd = pnl_pct / 100 * size
             total_pnl += pnl_usd
             held = self._format_elapsed(now - pos.get("entry_unix", now))
 
-            print(f"  {symbol:<14} {pos['score']:>6.0f} {entry:>12,.6g} {price:>12,.6g}"
+            print(f"  {symbol:<14} {pos['score']:>6.0f} ${size:>6.0f} {entry:>12,.6g} {price:>12,.6g}"
                   f"  {pnl_pct:>+7.1f}%  ${pnl_usd:>+9,.2f}  {pos['entry_time']:<22}  {held:>6}")
 
-        print(f"  {'─'*115}")
-        print(f"  {'Total unrealized P&L:':>85}  ${total_pnl:>+9,.2f}")
+        print(f"  {'─'*125}")
+        print(f"  {'Total unrealized P&L:':>95}  ${total_pnl:>+9,.2f}")
         print()
 
     def display_periodic_summary(self):
@@ -436,7 +466,7 @@ class MomentumPaperTrader:
         for pos in self.positions.values():
             price = pos.get("current_price", pos["entry_price"])
             pnl_pct = (price - pos["entry_price"]) / pos["entry_price"] * 100
-            unrealized += pnl_pct / 100 * self.amount
+            unrealized += pnl_pct / 100 * pos.get("trade_size", self.amount)
 
         elapsed = time.time() - self.start_time
         mins = int(elapsed / 60)
@@ -455,7 +485,7 @@ class MomentumPaperTrader:
         print(f"\n{'='*120}")
         print(f"  PAPER TRADING SUMMARY")
         print(f"  Session: {int(hours)}h {int(mins)}m | "
-              f"${self.amount} per trade @ {self.leverage}x leverage | Pool D accumulation strategy")
+              f"Score-based sizing @ {self.leverage}x leverage | Pool D accumulation strategy")
         print(f"{'='*120}")
 
         all_trades = list(self.closed_trades)
@@ -494,7 +524,7 @@ class MomentumPaperTrader:
                 price = pos.get("current_price", pos["entry_price"])
                 entry = pos["entry_price"]
                 pnl_pct = (price - entry) / entry * 100
-                pnl_usd = pnl_pct / 100 * self.amount
+                pnl_usd = pnl_pct / 100 * pos.get("trade_size", self.amount)
                 total_pnl += pnl_usd
                 if pnl_usd >= 0:
                     wins += 1
@@ -622,10 +652,11 @@ def run_auto_trader(args):
         api_key = os.environ.get("BYBIT_API_KEY", "")
         api_secret = os.environ.get("BYBIT_API_SECRET", "")
 
+    max_exposure = args.account_balance * args.max_exposure_mult
     session = TradingSession(
         max_per_cycle=MAX_TRADES_PER_CYCLE,
         max_per_day=MAX_TRADES_PER_DAY,
-        max_exposure=MAX_TOTAL_EXPOSURE_USDT,
+        max_exposure=max_exposure,
     )
 
     init_trade_log()
@@ -637,12 +668,14 @@ def run_auto_trader(args):
             session.traded_symbols.update(saved_traded_symbols)
         paper._traded_symbols_ref = session.traded_symbols
 
-    # Display config
+    base_size = args.account_balance / 10
     print(f"\n{'='*70}")
     print(f"  ACCUMULATION AUTO-TRADER [{env_label}] [{mode}]")
     print(f"{'='*70}")
-    print(f"  Trade amount:    ${args.amount} USDT per trade")
+    print(f"  Account balance: ${args.account_balance:,.0f}")
+    print(f"  Sizing:          Score-based (${base_size*0.5:.0f}-${base_size*2:.0f} per trade)")
     print(f"  Leverage:        {args.leverage}x")
+    print(f"  Max exposure:    ${max_exposure:,.0f} notional ({args.max_exposure_mult}x account)")
     print(f"  Strategy:        Pool D accumulation → exit on graduation")
     print(f"  Entry:           Pool D only (score 25+ AND accum signal 20+)")
     print(f"  Watch:           Pool A/B/C coins shown at score {args.min_score}+")
@@ -650,7 +683,6 @@ def run_auto_trader(args):
     print(f"  Scan interval:   every {args.interval} minutes")
     print(f"  Max per cycle:   {MAX_TRADES_PER_CYCLE} trades")
     print(f"  Max per day:     {MAX_TRADES_PER_DAY} trades")
-    print(f"  Max exposure:    ${MAX_TOTAL_EXPOSURE_USDT:,} (notional)")
     print(f"  Re-entry after:  {RE_ENTRY_COOLDOWN_HOURS}h cooldown")
     print(f"  Trade log:       {TRADE_LOG_FILE}")
 
@@ -660,7 +692,7 @@ def run_auto_trader(args):
         print(f"  >>> P&L summary shown after each scan. Ctrl+C for final summary <<<")
     else:
         print(f"\n  >>> LIVE MODE — REAL ORDERS WILL BE PLACED <<<")
-        print(f"  >>> Trading ${args.amount} per signal on {env_label} <<<")
+        print(f"  >>> Score-based sizing on {env_label} <<<")
 
     if args.live:
         # Verify connection (only needed for live trading)
@@ -856,28 +888,37 @@ def run_auto_trader(args):
                         print(f"     SKIP: {reason}")
                         continue
 
+                    # Score-based sizing
+                    trade_size = compute_trade_size(
+                        score, args.account_balance, max_exposure,
+                        session.total_exposure, args.leverage)
+                    if trade_size < 5:
+                        print(f"     SKIP: trade size too small (${trade_size:.0f}, exposure cap reached?)")
+                        continue
+                    print(f"     SIZE: ${trade_size:.0f} (score {score:.0f} → {trade_size/base_size:.1f}x base)")
+
                     # Get instrument info for qty precision
                     instrument = get_instrument_info(base_url, symbol)
                     if not instrument:
                         print(f"     SKIP: could not fetch instrument info")
                         continue
 
-                    qty = calculate_qty(args.amount, price, instrument)
+                    qty = calculate_qty(trade_size, price, instrument)
                     if not qty:
-                        print(f"     SKIP: qty too small for ${args.amount} at ${price}")
+                        print(f"     SKIP: qty too small for ${trade_size:.0f} at ${price}")
                         continue
 
                     est_value = float(qty) * price
                     print(f"     Order: BUY {qty} {symbol} (~${est_value:,.2f}) @ {args.leverage}x leverage")
 
-                    sl_price = price * 0.92  # 8% below entry (10x leverage = -80% margin before liquidation)
+                    sl_price = price * 0.92
 
                     if not args.live:
                         print(f"     [DRY-RUN] Would place order")
                         log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                                   score, signals, "dry-run", "N/A", "dry-run")
                         if paper:
-                            paper.enter(symbol, price, score, signals)
+                            paper.enter(symbol, price, score, signals, trade_size=trade_size)
                         session.record_trade(symbol, est_value * args.leverage)
                         trades_this_cycle += 1
                     else:
@@ -940,7 +981,7 @@ def run_auto_trader(args):
                  "entry_price": p["entry_price"],
                  "current_price": p.get("current_price", p["entry_price"]),
                  "pnl_pct": round((p.get("current_price", p["entry_price"]) - p["entry_price"]) / p["entry_price"] * 100, 2),
-                 "size_usdt": paper.amount,
+                 "size_usdt": p.get("trade_size", paper.amount),
                  "leverage": paper.leverage,
                  "entry_time": p.get("entry_unix", 0),
                  "score": p.get("score", 0)}
@@ -1003,7 +1044,11 @@ def main():
     parser.add_argument("--testnet", action="store_true",
                         help="Use testnet instead of mainnet")
     parser.add_argument("--amount", type=float, default=DEFAULT_AMOUNT_USDT,
-                        help=f"USDT amount per trade (default: ${DEFAULT_AMOUNT_USDT})")
+                        help=f"USDT amount per trade in fixed mode (default: ${DEFAULT_AMOUNT_USDT})")
+    parser.add_argument("--account-balance", type=float, default=DEFAULT_ACCOUNT_BALANCE,
+                        help=f"Account balance for score-based sizing (default: ${DEFAULT_ACCOUNT_BALANCE})")
+    parser.add_argument("--max-exposure-mult", type=float, default=DEFAULT_MAX_EXPOSURE_MULT,
+                        help=f"Max total exposure as multiple of account (default: {DEFAULT_MAX_EXPOSURE_MULT}x)")
     parser.add_argument("--leverage", type=int, default=DEFAULT_LEVERAGE,
                         help=f"Leverage multiplier (default: {DEFAULT_LEVERAGE}x)")
     parser.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE,
@@ -1017,8 +1062,9 @@ def main():
     if args.live and not args.testnet and not args.no_confirm:
         print(f"\n  WARNING: You are about to run LIVE auto-trading on MAINNET.")
         print(f"  This will place REAL orders with REAL money.")
-        print(f"  Amount: ${args.amount} per trade | Leverage: {args.leverage}x")
-        print(f"  Max daily: {MAX_TRADES_PER_DAY} trades (${MAX_TRADES_PER_DAY * args.amount:,.0f})")
+        base = args.account_balance / 10
+        print(f"  Account: ${args.account_balance:,.0f} | Size: ${base*0.5:.0f}-${base*2:.0f} per trade | Leverage: {args.leverage}x")
+        print(f"  Max exposure: ${args.account_balance * args.max_exposure_mult:,.0f} ({args.max_exposure_mult}x account)")
         confirm = input("\n  Type CONFIRM to proceed: ").strip()
         if confirm.upper() != "CONFIRM":
             print("  Cancelled.")

@@ -96,6 +96,7 @@ def _reader_thread(state: BotState):
 
 
 def start_bot(name: str, amount: float = 250, live: bool = False,
+              account_balance: float = 500, max_exposure_mult: float = 5,
               extra_args: list | None = None) -> dict:
     state = _bots[name]
     if state.status == "running":
@@ -104,9 +105,10 @@ def start_bot(name: str, amount: float = 250, live: bool = False,
     info = BOTS[name]
     cmd = ["python3", "-u", str(BOT_DIR / info["script"])]
 
-    # Always uses Bybit mainnet — paper mode (default) uses real ticker data
-    # without placing trades; live mode places real trades via API keys.
     cmd.extend(["--amount", str(amount)])
+    if name == "auto_trader":
+        cmd.extend(["--account-balance", str(account_balance),
+                     "--max-exposure-mult", str(max_exposure_mult)])
     cmd.extend(info["default_args"])
 
     if live:

@@ -307,12 +307,16 @@
     <!-- Stats bar -->
     <div class="stats-bar" id="stats-bar">
         <div class="stat-card">
+            <div class="stat-value" id="stat-runtime">—</div>
+            <div class="stat-label">Runtime</div>
+        </div>
+        <div class="stat-card">
             <div class="stat-value" id="stat-pnl">—</div>
             <div class="stat-label">Total P&L ($)</div>
         </div>
         <div class="stat-card">
             <div class="stat-value" id="stat-pnl-pct">—</div>
-            <div class="stat-label">Avg P&L (%)</div>
+            <div class="stat-label">Total P&L (%)</div>
         </div>
         <div class="stat-card">
             <div class="stat-value" id="stat-winrate">—</div>
@@ -387,8 +391,15 @@
             </div>
             <div class="controls">
                 <div class="control-group">
-                    <label>Amount $</label>
-                    <input type="number" id="amount-auto_trader" value="250" min="10" max="10000" step="50">
+                    <label>Account $</label>
+                    <input type="number" id="balance-auto_trader" value="500" min="50" max="100000" step="100"
+                        title="Account balance — bot sizes trades based on signal score">
+                </div>
+                <div class="control-group">
+                    <label>Max Exp</label>
+                    <input type="number" id="exposure-auto_trader" value="5" min="1" max="10" step="0.5"
+                        title="Max total exposure as multiple of account balance" style="width:55px">
+                    <label style="color:#4b5563">x</label>
                 </div>
                 <div class="checkbox-group">
                     <input type="checkbox" id="live-auto_trader">
@@ -432,15 +443,25 @@
         let statusInterval;
 
         function startBot(name) {
-            const amount = document.getElementById(`amount-${name}`).value;
+            const amountEl = document.getElementById(`amount-${name}`);
+            const amount = amountEl ? amountEl.value : 250;
             const live = document.getElementById(`live-${name}`).checked;
 
-            if (live && !confirm(`Start ${name} in LIVE mode with $${amount} per trade?`)) return;
+            const balEl = document.getElementById(`balance-${name}`);
+            const expEl = document.getElementById(`exposure-${name}`);
+            const accountBalance = balEl ? parseFloat(balEl.value) : 500;
+            const maxExposureMult = expEl ? parseFloat(expEl.value) : 5;
+
+            if (live && !confirm(`Start ${name} in LIVE mode? Account: $${accountBalance}`)) return;
 
             fetch(`/api/bot/${name}/start`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({amount: parseFloat(amount), live})
+                body: JSON.stringify({
+                    amount: parseFloat(amount), live,
+                    account_balance: accountBalance,
+                    max_exposure_mult: maxExposureMult
+                })
             }).then(r => r.json()).then(data => {
                 if (data.ok) {
                     connectLogs(name);
@@ -492,8 +513,19 @@
             };
         }
 
+        function fmtRuntime(seconds) {
+            if (!seconds || seconds <= 0) return '—';
+            const d = Math.floor(seconds / 86400);
+            const h = Math.floor((seconds % 86400) / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            if (d > 0) return `${d}d ${h}h ${m}m`;
+            if (h > 0) return `${h}h ${m}m`;
+            return `${m}m`;
+        }
+
         function refreshStatus() {
             fetch('/api/status').then(r => r.json()).then(bots => {
+                let maxUptime = 0;
                 bots.forEach(bot => {
                     const badge = document.getElementById(`status-${bot.name}`);
                     badge.textContent = bot.status.toUpperCase();
@@ -504,13 +536,14 @@
 
                     const uptime = document.getElementById(`uptime-${bot.name}`);
                     if (bot.status === 'running' && bot.uptime_s > 0) {
-                        const m = Math.floor(bot.uptime_s / 60);
-                        const h = Math.floor(m / 60);
-                        uptime.textContent = h > 0 ? `Running ${h}h ${m%60}m` : `Running ${m}m`;
+                        uptime.textContent = `Running ${fmtRuntime(bot.uptime_s)}`;
+                        if (bot.uptime_s > maxUptime) maxUptime = bot.uptime_s;
                     } else {
                         uptime.textContent = '';
                     }
                 });
+                document.getElementById('stat-runtime').textContent =
+                    maxUptime > 0 ? fmtRuntime(maxUptime) : '—';
             });
         }
 
@@ -540,8 +573,10 @@
                 // Update stats bar
                 const pnl = stats.total_pnl_usd || 0;
                 document.getElementById('stat-pnl').innerHTML = fmtPnl(pnl, '');
-                document.getElementById('stat-pnl-pct').innerHTML =
-                    stats.avg_pnl_pct !== undefined ? fmtPnl(stats.avg_pnl_pct, '%') : '—';
+                const balEl = document.getElementById('balance-auto_trader');
+                const acctBal = balEl ? parseFloat(balEl.value) : 500;
+                const totalPnlPct = acctBal > 0 ? (pnl / acctBal) * 100 : 0;
+                document.getElementById('stat-pnl-pct').innerHTML = fmtPnl(totalPnlPct, '%');
                 document.getElementById('stat-winrate').textContent =
                     stats.win_rate !== undefined ? stats.win_rate.toFixed(1) + '%' : '—';
                 document.getElementById('stat-total').textContent =
