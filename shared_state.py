@@ -129,20 +129,36 @@ def append_trade(bot_name: str, trade: dict):
         history = history[-500:]
     _atomic_write(TRADE_HISTORY_FILE, history)
 
+def _resolve_run(trade: dict) -> int:
+    """Find the correct run for a trade based on its timestamp."""
+    closed_at = trade.get("closed_at", 0)
+    bot = trade.get("bot", "")
+    runs = _read_runs()
+    best_run = 1
+    for name in (bot, _bot_aliases().get(bot, "")):
+        for entry in runs.get(name, {}).get("history", []):
+            if entry["started_at"] <= closed_at:
+                best_run = entry["run"]
+    return best_run
+
 def read_trade_history(limit: int = 100) -> list[dict]:
-    """Read trade history, backfilling untagged trades as run 1."""
+    """Read trade history, resolving run numbers from timestamps."""
     if not TRADE_HISTORY_FILE.exists():
         return []
     try:
         with open(TRADE_HISTORY_FILE) as f:
             data = json.load(f)
-        needs_write = False
-        for t in data:
-            if not t.get("run"):
-                t["run"] = 1
-                needs_write = True
-        if needs_write:
-            _atomic_write(TRADE_HISTORY_FILE, data)
+        runs = _read_runs()
+        has_runs = any(r.get("history") for r in runs.values())
+        if has_runs:
+            needs_write = False
+            for t in data:
+                correct = _resolve_run(t)
+                if t.get("run") != correct:
+                    t["run"] = correct
+                    needs_write = True
+            if needs_write:
+                _atomic_write(TRADE_HISTORY_FILE, data)
         return data[-limit:] if limit else data
     except (json.JSONDecodeError, OSError):
         return []
