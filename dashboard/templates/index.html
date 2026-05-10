@@ -396,10 +396,10 @@
                         title="Account balance — bot sizes trades based on signal score">
                 </div>
                 <div class="control-group">
-                    <label>Max Exp</label>
+                    <label>Max Exposure</label>
                     <input type="number" id="exposure-auto_trader" value="5" min="1" max="10" step="0.5"
-                        title="Max total exposure as multiple of account balance" style="width:55px">
-                    <label style="color:#4b5563">x</label>
+                        title="Max total open notional = Account × this. E.g. $500 × 5x = $2,500 max across all positions" style="width:55px">
+                    <label style="color:#4b5563">x acct</label>
                 </div>
                 <div class="checkbox-group">
                     <input type="checkbox" id="live-auto_trader">
