@@ -10,6 +10,13 @@ POSITIONS_FILE = DATA_DIR / "positions.json"
 TRADE_HISTORY_FILE = DATA_DIR / "trade_history.json"
 RUNS_FILE = DATA_DIR / "runs.json"
 
+BOT_STATE_FILES = {
+    "auto_trader": Path(__file__).parent / "data" / "auto_trader_state.json",
+    "accumulation": Path(__file__).parent / "data" / "auto_trader_state.json",
+    "sfp_scanner": Path(__file__).parent / "sfp_position_state.json",
+    "sfp": Path(__file__).parent / "sfp_position_state.json",
+}
+
 def _ensure_dir():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -77,11 +84,27 @@ def read_all_positions() -> dict:
         return {}
 
 def clear_positions(bot_name: str):
-    """Remove all positions for a bot (called on stop)."""
+    """Remove all positions for a bot (called on paper stop)."""
     all_positions = read_all_positions()
-    if bot_name in all_positions:
-        del all_positions[bot_name]
+    changed = False
+    for key in (bot_name, _bot_aliases().get(bot_name, bot_name)):
+        if key in all_positions:
+            del all_positions[key]
+            changed = True
+    if changed:
         _atomic_write(POSITIONS_FILE, all_positions)
+    state_file = BOT_STATE_FILES.get(bot_name)
+    if state_file and state_file.exists():
+        state_file.unlink()
+
+
+def _bot_aliases() -> dict:
+    return {
+        "auto_trader": "accumulation",
+        "accumulation": "auto_trader",
+        "sfp_scanner": "sfp",
+        "sfp": "sfp_scanner",
+    }
 
 
 # ── Trades ──
