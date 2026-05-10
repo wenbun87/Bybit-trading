@@ -63,7 +63,12 @@ def start_run(bot_name: str, live: bool = False) -> int:
 
 def get_current_run(bot_name: str) -> int:
     runs = _read_runs()
-    return runs.get(bot_name, {}).get("current", 0)
+    run = runs.get(bot_name, {}).get("current", 0)
+    if run == 0:
+        alias = _bot_aliases().get(bot_name)
+        if alias:
+            run = runs.get(alias, {}).get("current", 0)
+    return run
 
 
 # ── Positions ──
