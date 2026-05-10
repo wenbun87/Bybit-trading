@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -14,6 +15,8 @@ from pathlib import Path
 from queue import Queue, Empty
 
 BOT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BOT_DIR))
+import shared_state
 
 BOTS = {
     "auto_trader": {
@@ -86,6 +89,7 @@ def _reader_thread(state: BotState):
     proc.wait()
     state.status = "stopped"
     state.started_at = None
+    shared_state.clear_positions(state.name)
     state.log_buffer.append(f"[BOT EXITED with code {proc.returncode}]")
     for q in list(state.subscribers):
         try:
@@ -139,7 +143,9 @@ def start_bot(name: str, amount: float = 250, live: bool = False,
     state.started_at = time.time()
     state.args_used = cmd[2:]  # skip python3 -u
     state.log_buffer.clear()
-    state.log_buffer.append(f"[STARTED] {' '.join(cmd)}")
+
+    run_id = shared_state.start_run(name)
+    state.log_buffer.append(f"[STARTED] Run #{run_id} | {' '.join(cmd)}")
 
     # Start log reader thread
     t = threading.Thread(target=_reader_thread, args=(state,), daemon=True)
@@ -168,6 +174,7 @@ def stop_bot(name: str) -> dict:
     state.status = "stopped"
     state.started_at = None
     state.log_buffer.append("[STOPPED by user]")
+    shared_state.clear_positions(name)
     _stop_caffeinate(state)
     return {"ok": True}
 

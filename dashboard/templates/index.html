@@ -365,6 +365,7 @@
             <table id="history-table">
                 <thead>
                     <tr>
+                        <th>Run</th>
                         <th>Date</th>
                         <th>Bot</th>
                         <th>Symbol</th>
@@ -377,7 +378,7 @@
                     </tr>
                 </thead>
                 <tbody id="history-tbody">
-                    <tr class="empty-row"><td colspan="9">No trade history</td></tr>
+                    <tr class="empty-row"><td colspan="10">No trade history</td></tr>
                 </tbody>
             </table>
         </div>
@@ -627,7 +628,7 @@
             fetch('/api/trades?limit=20').then(r => r.json()).then(trades => {
                 const tbody = document.getElementById('history-tbody');
                 if (!trades || trades.length === 0) {
-                    tbody.innerHTML = '<tr class="empty-row"><td colspan="9">No trade history</td></tr>';
+                    tbody.innerHTML = '<tr class="empty-row"><td colspan="10">No trade history</td></tr>';
                     return;
                 }
                 const sorted = trades.slice().reverse();
@@ -639,7 +640,9 @@
                         ? fmtHeld(t.closed_at - t.entry_time) : '—';
                     const pnlPct = t.pnl_pct !== undefined ? t.pnl_pct : null;
                     const pnlUsd = t.pnl_usd !== undefined ? t.pnl_usd : null;
+                    const runLabel = t.run ? `#${t.run}` : '—';
                     return `<tr>
+                        <td style="color:#6b7280">${runLabel}</td>
                         <td>${date}</td>
                         <td>${t.bot || '—'}</td>
                         <td style="color:#d0d5de; font-weight:500">${t.symbol || '—'}</td>
