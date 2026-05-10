@@ -73,6 +73,7 @@ MAX_TRADES_PER_CYCLE = 2        # max trades per scan cycle
 MAX_TRADES_PER_DAY = 6          # max trades in 24 hours
 DEFAULT_LEVERAGE = 10           # 10x leverage
 RE_ENTRY_COOLDOWN_HOURS = 6     # allow re-entry on same symbol after this cooldown
+MIN_HOLD_SECONDS = 1800         # 30 min minimum hold before signal-based exits (hard exit still active)
 
 # Score-based sizing tiers: (min_score, multiplier_of_base)
 SCORE_SIZE_TIERS = [
@@ -730,8 +731,10 @@ def run_auto_trader(args):
             for sym in open_symbols:
                 if paper and sym in paper.positions:
                     entry_price = paper.positions[sym]["entry_price"]
+                    entry_unix = paper.positions[sym].get("entry_unix", 0)
                 else:
                     entry_price = 0
+                    entry_unix = 0
                     if args.live:
                         for p in live_positions:
                             if p.get("symbol") == sym:
@@ -772,13 +775,17 @@ def run_auto_trader(args):
                     hrs = (time.time() - graduation_tracker[sym]) / 3600
                     grad_label = f"{hrs:.1f}h ago"
                 elif not exit_info.get("graduated") and sym in graduation_tracker:
-                    # Dropped back out of Pool A/B
                     del graduation_tracker[sym]
                     grad_label = None
                 else:
                     grad_label = None
 
-                if exit_info["exit"]:
+                # Minimum hold: skip signal-based exits for first 30 min
+                held_sec = time.time() - entry_unix
+                if exit_info["exit"] and held_sec < MIN_HOLD_SECONDS:
+                    mins_left = (MIN_HOLD_SECONDS - held_sec) / 60
+                    print(f"  HOLD:  {sym} (Pool {pool_now}, {pnl:+.1f}%) — exit signal but min hold {mins_left:.0f}m remaining")
+                elif exit_info["exit"]:
                     print(f"  EXIT SIGNAL: {sym} (Pool {pool_now}, {pnl:+.1f}%)")
                     print(f"    Reason: {exit_info['reason']}")
 
@@ -1015,6 +1022,9 @@ def run_auto_trader(args):
                         pnl = (current_price - pos["entry_price"]) / pos["entry_price"] * 100
                         if pnl <= -15:
                             paper.exit(sym, current_price, f"HARD EXIT: P&L {pnl:.1f}% breached -15%")
+                            continue
+                        held_sec = time.time() - pos.get("entry_unix", 0)
+                        if held_sec < MIN_HOLD_SECONDS:
                             continue
                         exit_info = check_exit_signals(base_url, sym, pos["entry_price"],
                                                        paper.graduated_at.get(sym))
