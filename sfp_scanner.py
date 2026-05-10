@@ -94,6 +94,8 @@ INTERVAL_LABELS = {
 # Trading config
 RECV_WINDOW = "5000"
 DEFAULT_AMOUNT_USDT = 500
+DEFAULT_ACCOUNT_BALANCE = 500
+DEFAULT_MAX_EXPOSURE_MULT = 5
 DEFAULT_LEVERAGE = 5
 MAX_TRADES_PER_CYCLE = 2
 MAX_TRADES_PER_DAY = 6
@@ -879,10 +881,13 @@ GRADE_ORDER = {"A+": 0, "A": 1, "B": 2, "C": 3, "D": 4}
 class PaperTrader:
     """Tracks hypothetical trades during scan-only mode."""
 
-    def __init__(self, amount_usdt, leverage, min_grade="B"):
+    def __init__(self, amount_usdt, leverage, min_grade="B",
+                 account_balance=500, max_exposure_mult=5):
         self.amount = amount_usdt
         self.leverage = leverage
         self.min_grade = min_grade
+        self.account_balance = account_balance
+        self.max_exposure = account_balance * max_exposure_mult
         self.positions = {}       # symbol -> position dict
         self.closed_trades = []   # list of completed trade dicts
         self.traded_symbols = {}  # symbol -> last_trade_unix_ts (cooldown)
@@ -924,12 +929,21 @@ class PaperTrader:
             if now - last_ts < RE_ENTRY_COOLDOWN_HOURS * 3600:
                 continue
 
+            current_exposure = sum(
+                p["qty"] * p["entry_price"] for p in self.positions.values()
+            )
+            notional = self.amount
+            remaining = max(0, self.max_exposure - current_exposure)
+            if notional > remaining:
+                notional = remaining
+            if notional < 5:
+                continue
+
             sfp = r["sfp"]
             side = "long" if sfp["type"] == "BULLISH" else "short"
             entry_price = r["lastPrice"]
             sweep_price = sfp["sweep_price"]
-            # Match live mode: amount = total notional (position size), not margin × leverage
-            qty = self.amount / entry_price
+            qty = notional / entry_price
 
             # Structural stop: just beyond the sweep price (pattern invalidation)
             if side == "long":
@@ -954,7 +968,7 @@ class PaperTrader:
             entered += 1
             action = "LONG" if side == "long" else "SHORT"
             print(f"  [PAPER] {action} {symbol} @ {entry_price:,.6g} | "
-                  f"Grade {r['grade']} | ${self.amount} x{self.leverage} | "
+                  f"Grade {r['grade']} | ${notional:.0f} x{self.leverage} | "
                   f"SL: {sl_price:,.4g} ({sl_dist_pct:.1f}% away, beyond sweep {sweep_price:,.4g})")
 
         return entered
@@ -1486,6 +1500,18 @@ def execute_sfp_trades(results, base_url, api_key, api_secret, args, traded_symb
         print(f"\n  No tradeable SFPs (grade {min_grade}+ and fresh, no cooldown).\n")
         return traded_symbols
 
+    max_exposure = args.account_balance * args.max_exposure_mult
+    current_exposure = 0
+    if args.live:
+        pos_data = auth_request(base_url, "GET", "/v5/position/list",
+                                api_key, api_secret,
+                                {"category": "linear", "settleCoin": "USDT"})
+        for p in pos_data.get("result", {}).get("list", []):
+            sz = float(p.get("size", "0") or "0")
+            mp = float(p.get("markPrice", "0") or "0")
+            if sz > 0:
+                current_exposure += sz * mp
+
     trades_this_cycle = 0
     for r in tradeable:
         if trades_this_cycle >= MAX_TRADES_PER_CYCLE:
@@ -1501,12 +1527,18 @@ def execute_sfp_trades(results, base_url, api_key, api_secret, args, traded_symb
 
         print(f"  >> {sfp_type} SFP [{grade}] on {symbol} ({tf}) @ ${price:,.6g}")
 
+        remaining = max(0, max_exposure - current_exposure)
+        trade_notional = min(args.amount, remaining)
+        if trade_notional < 5:
+            print(f"     SKIP: max exposure reached (${current_exposure:,.0f}/${max_exposure:,.0f})")
+            break
+
         instrument = get_instrument_info(base_url, symbol)
         if not instrument:
             print(f"     SKIP: no instrument info")
             continue
 
-        qty = calculate_qty(args.amount, price, instrument)
+        qty = calculate_qty(trade_notional, price, instrument)
         if not qty:
             print(f"     SKIP: qty too small")
             continue
@@ -1530,6 +1562,7 @@ def execute_sfp_trades(results, base_url, api_key, api_secret, args, traded_symb
                           grade, sfp_type, tf, "dry-run", "N/A", "dry-run")
             traded_symbols[symbol] = time.time()
             trades_this_cycle += 1
+            current_exposure += est_value
         else:
             auth_request(base_url, "POST", "/v5/position/set-leverage",
                          api_key, api_secret, {
@@ -1557,6 +1590,7 @@ def execute_sfp_trades(results, base_url, api_key, api_secret, args, traded_symb
                               grade, sfp_type, tf, "filled", oid, "live")
                 traded_symbols[symbol] = time.time()
                 trades_this_cycle += 1
+                current_exposure += est_value
                 state_key = f"{symbol}_{side}"
                 pos_state = load_sfp_state()
                 pos_state[state_key] = {
@@ -1647,6 +1681,10 @@ def main():
     parser.add_argument("--live", action="store_true", help="Execute real trades (requires --trade)")
     parser.add_argument("--amount", type=float, default=DEFAULT_AMOUNT_USDT,
                         help=f"USDT per trade (default: {DEFAULT_AMOUNT_USDT})")
+    parser.add_argument("--account-balance", type=float, default=DEFAULT_ACCOUNT_BALANCE,
+                        help=f"Account balance for exposure limits (default: ${DEFAULT_ACCOUNT_BALANCE})")
+    parser.add_argument("--max-exposure-mult", type=float, default=DEFAULT_MAX_EXPOSURE_MULT,
+                        help=f"Max total exposure as multiple of account (default: {DEFAULT_MAX_EXPOSURE_MULT}x)")
     parser.add_argument("--leverage", type=int, default=DEFAULT_LEVERAGE,
                         help=f"Leverage (default: {DEFAULT_LEVERAGE}x)")
     parser.add_argument("--initial-sl", type=float, default=DEFAULT_INITIAL_SL_PCT,
@@ -1684,7 +1722,8 @@ def main():
     paper = None
 
     if paper_mode:
-        paper = PaperTrader(args.amount, args.leverage, args.min_grade)
+        paper = PaperTrader(args.amount, args.leverage, args.min_grade,
+                            args.account_balance, args.max_exposure_mult)
 
     if trading_mode:
         api_key, api_secret = get_credentials()
@@ -1716,7 +1755,9 @@ def main():
     if args.msb_filter:
         print(f"  MSB + BB filter: ON (swing L{args.msb_swing_left}/R{args.msb_swing_right}, lookback {args.msb_lookback} bars)")
     if paper_mode:
+        max_exp = args.account_balance * args.max_exposure_mult
         print(f"  Paper trade:     ${args.amount} @ {args.leverage}x | Min grade: {args.min_grade}")
+        print(f"  Account:         ${args.account_balance:,.0f} | Max exposure: ${max_exp:,.0f} ({args.max_exposure_mult}x)")
         print(f"  Stop loss:       Structural (beyond sweep + {SL_BUFFER_PCT}% buffer)")
         print(f"  Trailing tiers:  10%→8% | 30%→6% | 100%→3% | 300%→2%")
         print(f"  Re-entry after:  {RE_ENTRY_COOLDOWN_HOURS}h cooldown")

@@ -112,9 +112,8 @@ def start_bot(name: str, amount: float = 250, live: bool = False,
     cmd = ["python3", "-u", str(BOT_DIR / info["script"])]
 
     cmd.extend(["--amount", str(amount)])
-    if name == "auto_trader":
-        cmd.extend(["--account-balance", str(account_balance),
-                     "--max-exposure-mult", str(max_exposure_mult)])
+    cmd.extend(["--account-balance", str(account_balance),
+                "--max-exposure-mult", str(max_exposure_mult)])
     cmd.extend(info["default_args"])
 
     if live:
