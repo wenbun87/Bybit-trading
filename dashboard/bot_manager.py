@@ -41,6 +41,7 @@ class BotState:
     subscribers: list = field(default_factory=list)
     status: str = "stopped"
     caffeinate_on: bool = False
+    is_live: bool = False
     started_at: float | None = None
     args_used: list = field(default_factory=list)
 
@@ -89,7 +90,8 @@ def _reader_thread(state: BotState):
     proc.wait()
     state.status = "stopped"
     state.started_at = None
-    shared_state.clear_positions(state.name)
+    if not state.is_live:
+        shared_state.clear_positions(state.name)
     state.log_buffer.append(f"[BOT EXITED with code {proc.returncode}]")
     for q in list(state.subscribers):
         try:
@@ -140,11 +142,12 @@ def start_bot(name: str, amount: float = 250, live: bool = False,
 
     state.process = proc
     state.status = "running"
+    state.is_live = live
     state.started_at = time.time()
     state.args_used = cmd[2:]  # skip python3 -u
     state.log_buffer.clear()
 
-    run_id = shared_state.start_run(name)
+    run_id = shared_state.start_run(name, live=live)
     state.log_buffer.append(f"[STARTED] Run #{run_id} | {' '.join(cmd)}")
 
     # Start log reader thread
@@ -173,8 +176,11 @@ def stop_bot(name: str) -> dict:
 
     state.status = "stopped"
     state.started_at = None
-    state.log_buffer.append("[STOPPED by user]")
-    shared_state.clear_positions(name)
+    if state.is_live:
+        state.log_buffer.append("[STOPPED by user — live positions kept on exchange]")
+    else:
+        state.log_buffer.append("[STOPPED by user]")
+        shared_state.clear_positions(name)
     _stop_caffeinate(state)
     return {"ok": True}
 

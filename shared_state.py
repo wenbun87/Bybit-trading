@@ -33,18 +33,21 @@ def _read_runs() -> dict:
     except (json.JSONDecodeError, OSError):
         return {}
 
-def start_run(bot_name: str) -> int:
-    """Increment run counter for a bot, clear its positions, return new run id."""
+def start_run(bot_name: str, live: bool = False) -> int:
+    """Increment run counter for a bot, return new run id.
+    Clears positions for paper mode only — live positions stay."""
     runs = _read_runs()
     bot_runs = runs.get(bot_name, {"current": 0, "history": []})
     bot_runs["current"] = bot_runs.get("current", 0) + 1
     bot_runs["history"].append({
         "run": bot_runs["current"],
         "started_at": time.time(),
+        "live": live,
     })
     runs[bot_name] = bot_runs
     _atomic_write(RUNS_FILE, runs)
-    clear_positions(bot_name)
+    if not live:
+        clear_positions(bot_name)
     return bot_runs["current"]
 
 def get_current_run(bot_name: str) -> int:
