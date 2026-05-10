@@ -65,7 +65,14 @@ async def toggle_caffeinate(name: str):
 
 @app.get("/api/positions")
 async def get_positions():
-    return shared_state.read_all_positions()
+    all_pos = shared_state.read_all_positions()
+    filtered = {}
+    for bot_key, data in all_pos.items():
+        name = {"accumulation": "auto_trader", "sfp": "sfp_scanner"}.get(bot_key, bot_key)
+        state = bot_manager.get_state(name) if name in ("auto_trader", "sfp_scanner") else None
+        if state and (state.status == "running" or state.is_live):
+            filtered[bot_key] = data
+    return filtered
 
 
 @app.get("/api/trades")

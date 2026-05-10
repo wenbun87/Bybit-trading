@@ -646,7 +646,7 @@
                         ? fmtHeld(t.closed_at - t.entry_time) : '—';
                     const pnlPct = t.pnl_pct !== undefined ? t.pnl_pct : null;
                     const pnlUsd = t.pnl_usd !== undefined ? t.pnl_usd : null;
-                    const runLabel = t.run ? `#${t.run}` : 'Pre';
+                    const runLabel = t.run ? `Paper ${t.run}` : '—';
                     return `<tr>
                         <td style="color:#9ca3af">${runLabel}</td>
                         <td>${date}</td>

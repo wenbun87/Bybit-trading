@@ -45,6 +45,10 @@ def start_run(bot_name: str, live: bool = False) -> int:
     Clears positions for paper mode only — live positions stay."""
     runs = _read_runs()
     bot_runs = runs.get(bot_name, {"current": 0, "history": []})
+    if bot_runs["current"] == 0:
+        read_trade_history(limit=1)
+        if TRADE_HISTORY_FILE.exists():
+            bot_runs["current"] = 1
     bot_runs["current"] = bot_runs.get("current", 0) + 1
     bot_runs["history"].append({
         "run": bot_runs["current"],
@@ -121,12 +125,19 @@ def append_trade(bot_name: str, trade: dict):
     _atomic_write(TRADE_HISTORY_FILE, history)
 
 def read_trade_history(limit: int = 100) -> list[dict]:
-    """Read trade history."""
+    """Read trade history, backfilling untagged trades as run 1."""
     if not TRADE_HISTORY_FILE.exists():
         return []
     try:
         with open(TRADE_HISTORY_FILE) as f:
             data = json.load(f)
+        needs_write = False
+        for t in data:
+            if not t.get("run"):
+                t["run"] = 1
+                needs_write = True
+        if needs_write:
+            _atomic_write(TRADE_HISTORY_FILE, data)
         return data[-limit:] if limit else data
     except (json.JSONDecodeError, OSError):
         return []
