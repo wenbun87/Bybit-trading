@@ -391,9 +391,10 @@ class MomentumPaperTrader:
             "symbol": symbol,
             "entry_price": pos["entry_price"],
             "exit_price": current_price,
-            "pnl_pct": round(pnl_pct, 2),
+            "pnl_pct": round(pnl_pct * self.leverage, 2),
             "pnl_usd": round(pnl_usd, 2),
             "size_usdt": size,
+            "leverage": self.leverage,
             "reason": reason,
             "entry_time": pos.get("entry_unix", 0),
         })

@@ -1047,9 +1047,10 @@ class PaperTrader:
                 "side": pos["side"],
                 "entry_price": pos["entry_price"],
                 "exit_price": price,
-                "pnl_pct": round(pnl_pct, 2),
+                "pnl_pct": round(pnl_pct * self.leverage, 2),
                 "pnl_usd": round(pnl_usd, 2),
                 "size_usdt": round(notional, 2),
+                "leverage": self.leverage,
                 "reason": reason,
                 "entry_time": pos.get("entry_unix", 0),
             })
