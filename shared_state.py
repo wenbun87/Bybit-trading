@@ -143,31 +143,45 @@ def _resolve_run(trade: dict) -> int:
 
 DEFAULT_LEVERAGE = {"accumulation": 10, "sfp": 5}
 
+def _recalc_pnl(t: dict):
+    """Recalculate pnl_pct and pnl_usd from raw price data."""
+    entry = t.get("entry_price", 0)
+    exit_ = t.get("exit_price", 0)
+    if not entry or not exit_:
+        return
+    bot = t.get("bot", "")
+    lev = DEFAULT_LEVERAGE.get(bot, 10)
+    side = t.get("side", "long")
+    if side == "short":
+        raw_pct = (entry - exit_) / entry * 100
+    else:
+        raw_pct = (exit_ - entry) / entry * 100
+    size = t.get("size_usdt", 0)
+    t["pnl_pct"] = round(raw_pct * lev, 2)
+    t["pnl_usd"] = round(raw_pct / 100 * size * lev, 2) if size else round(raw_pct * lev, 2)
+    t["leverage"] = lev
+
 def read_trade_history(limit: int = 100) -> list[dict]:
-    """Read trade history, migrating old records as needed."""
+    """Read trade history, ensuring P&L is correct."""
     if not TRADE_HISTORY_FILE.exists():
         return []
     try:
         with open(TRADE_HISTORY_FILE) as f:
             data = json.load(f)
         needs_write = False
+        runs = _read_runs()
+        has_runs = any(r.get("history") for r in runs.values())
 
         for t in data:
-            # Migrate run numbers
-            runs = _read_runs()
-            if any(r.get("history") for r in runs.values()):
+            if has_runs:
                 correct = _resolve_run(t)
                 if t.get("run") != correct:
                     t["run"] = correct
                     needs_write = True
 
-            # Migrate unleveraged pnl_pct → leveraged
-            if "leverage" not in t and "pnl_pct" in t:
-                bot = t.get("bot", "")
-                lev = DEFAULT_LEVERAGE.get(bot, 10)
-                t["leverage"] = lev
-                t["pnl_pct"] = round(t["pnl_pct"] * lev, 2)
-                t["pnl_usd"] = round(t.get("pnl_usd", 0) * lev, 2)
+            if t.get("_pnl_v") != 2:
+                _recalc_pnl(t)
+                t["_pnl_v"] = 2
                 needs_write = True
 
         if needs_write:
