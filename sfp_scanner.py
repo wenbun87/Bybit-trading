@@ -1023,7 +1023,7 @@ class PaperTrader:
         for symbol, price, pnl_pct, reason in to_close:
             pos = self.positions.pop(symbol)
             notional = pos.get("qty", self.amount / pos["entry_price"]) * pos["entry_price"]
-            pnl_usd = pnl_pct / 100 * notional * self.leverage
+            pnl_usd = pnl_pct / 100 * notional
             self.closed_trades.append({
                 "symbol": symbol,
                 "side": pos["side"],
@@ -1047,7 +1047,7 @@ class PaperTrader:
                 "side": pos["side"],
                 "entry_price": pos["entry_price"],
                 "exit_price": price,
-                "pnl_pct": round(pnl_pct * self.leverage, 2),
+                "pnl_pct": round(pnl_pct, 2),
                 "pnl_usd": round(pnl_usd, 2),
                 "size_usdt": round(notional, 2),
                 "leverage": self.leverage,

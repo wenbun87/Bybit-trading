@@ -373,7 +373,7 @@ class MomentumPaperTrader:
         entry = pos["entry_price"]
         size = pos.get("trade_size", self.amount)
         pnl_pct = (current_price - entry) / entry * 100
-        pnl_usd = pnl_pct / 100 * size * self.leverage
+        pnl_usd = pnl_pct / 100 * size
         held = self._format_elapsed(time.time() - pos.get("entry_unix", time.time()))
         self.closed_trades.append({
             **pos,
@@ -391,7 +391,7 @@ class MomentumPaperTrader:
             "symbol": symbol,
             "entry_price": pos["entry_price"],
             "exit_price": current_price,
-            "pnl_pct": round(pnl_pct * self.leverage, 2),
+            "pnl_pct": round(pnl_pct, 2),
             "pnl_usd": round(pnl_usd, 2),
             "size_usdt": size,
             "leverage": self.leverage,

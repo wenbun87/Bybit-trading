@@ -149,17 +149,14 @@ def _recalc_pnl(t: dict):
     exit_ = t.get("exit_price", 0)
     if not entry or not exit_:
         return
-    bot = t.get("bot", "")
-    lev = DEFAULT_LEVERAGE.get(bot, 10)
     side = t.get("side", "long")
     if side == "short":
         raw_pct = (entry - exit_) / entry * 100
     else:
         raw_pct = (exit_ - entry) / entry * 100
     size = t.get("size_usdt", 0)
-    t["pnl_pct"] = round(raw_pct * lev, 2)
-    t["pnl_usd"] = round(raw_pct / 100 * size * lev, 2) if size else round(raw_pct * lev, 2)
-    t["leverage"] = lev
+    t["pnl_pct"] = round(raw_pct, 2)
+    t["pnl_usd"] = round(raw_pct / 100 * size, 2) if size else 0
 
 def read_trade_history(limit: int = 100) -> list[dict]:
     """Read trade history, ensuring P&L is correct."""
@@ -179,9 +176,9 @@ def read_trade_history(limit: int = 100) -> list[dict]:
                     t["run"] = correct
                     needs_write = True
 
-            if t.get("_pnl_v") != 2:
+            if t.get("_pnl_v") != 3:
                 _recalc_pnl(t)
-                t["_pnl_v"] = 2
+                t["_pnl_v"] = 3
                 needs_write = True
 
         if needs_write:
