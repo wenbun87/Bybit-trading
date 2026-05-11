@@ -1688,7 +1688,7 @@ def main():
                         help=f"Right bars for M5 swing detection (default: {DEFAULT_MSB_SWING_RIGHT})")
     parser.add_argument("--msb-lookback", type=int, default=DEFAULT_MSB_LOOKBACK,
                         help=f"Max count-TF bars after SFP to find MSB (default: {DEFAULT_MSB_LOOKBACK})")
-    parser.add_argument("--watch", type=int, default=15, help="Rescan interval in minutes (default: 15, 0 for one-shot)")
+    parser.add_argument("--watch", type=int, default=5, help="Rescan interval in minutes (default: 5, 0 for one-shot)")
     parser.add_argument("--save", action="store_true", help="Save results to JSON")
     # Trading flags
     parser.add_argument("--trade", action="store_true", help="Enable auto-trading (dry-run by default)")
@@ -1835,9 +1835,32 @@ def main():
                 paper.display_summary()
             break
 
-        print(f"\n  Next scan + P&L update in {args.watch} min... (Ctrl+C to stop)\n")
+        print(f"\n  Next scan in {args.watch} min... (Ctrl+C to stop)\n")
         try:
-            time.sleep(args.watch * 60)
+            price_check_interval = 60  # 1 minute
+            total_wait = args.watch * 60
+            waited = 0
+            while waited < total_wait:
+                time.sleep(min(price_check_interval, total_wait - waited))
+                waited += price_check_interval
+                if waited < total_wait and paper and paper.positions:
+                    print(f"  [Price check — {(total_wait - waited)//60}m until next scan]")
+                    tickers = fetch_linear_tickers(base_url)
+                    paper.update_prices(tickers)
+                    price_map = {t["symbol"]: float(t["lastPrice"]) for t in tickers
+                                 if "lastPrice" in t}
+                    shared_state.write_positions("sfp", [
+                        {"symbol": sym, "side": p["side"], "entry_price": p["entry_price"],
+                         "current_price": price_map.get(sym, p["entry_price"]),
+                         "pnl_pct": round(((price_map.get(sym, p["entry_price"]) - p["entry_price"]) / p["entry_price"] * 100)
+                                          if p["side"] == "long" else
+                                          ((p["entry_price"] - price_map.get(sym, p["entry_price"])) / p["entry_price"] * 100), 2),
+                         "size_usdt": p.get("qty", paper.amount / p["entry_price"]) * p["entry_price"],
+                         "leverage": paper.leverage,
+                         "entry_time": p.get("entry_unix", 0),
+                         "grade": p.get("grade", "")}
+                        for sym, p in paper.positions.items()
+                    ])
         except KeyboardInterrupt:
             if paper:
                 paper.display_summary()

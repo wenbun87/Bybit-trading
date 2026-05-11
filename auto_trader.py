@@ -68,7 +68,7 @@ DEFAULT_AMOUNT_USDT = 250       # $ per trade (fixed mode, overridden by score-b
 DEFAULT_ACCOUNT_BALANCE = 500   # Account balance for score-based sizing
 DEFAULT_MAX_EXPOSURE_MULT = 5   # Max total exposure = balance × this (with leverage)
 DEFAULT_MIN_SCORE = 40          # ELEVATED threshold (catch accumulation earlier)
-DEFAULT_INTERVAL_MIN = 15       # scan every 15 minutes
+DEFAULT_INTERVAL_MIN = 5        # scan every 5 minutes
 MAX_TRADES_PER_CYCLE = 2        # max trades per scan cycle
 MAX_TRADES_PER_DAY = 6          # max trades in 24 hours
 DEFAULT_LEVERAGE = 10           # 10x leverage
@@ -1005,18 +1005,29 @@ def run_auto_trader(args):
 
         print(f"\n  Next scan in {args.interval} min... (Ctrl+C to stop)")
         try:
-            # Check exits every 3 minutes between full scans
-            exit_check_interval = 180  # 3 minutes
+            # Check exits every 1 minute between full scans
+            exit_check_interval = 60  # 1 minute
             total_wait = args.interval * 60
             waited = 0
             while waited < total_wait:
                 time.sleep(min(exit_check_interval, total_wait - waited))
                 waited += exit_check_interval
                 if waited < total_wait and paper and paper.positions:
-                    # Quick exit check
-                    print(f"\n  [Exit check — {(total_wait - waited)//60}m until next scan]")
+                    print(f"\n  [Price check — {(total_wait - waited)//60}m until next scan]")
                     tickers = fetch_all_linear_tickers(base_url)
                     paper.update_prices(tickers)
+                    # Update dashboard positions
+                    shared_state.write_positions("accumulation", [
+                        {"symbol": sym, "side": "long",
+                         "entry_price": p["entry_price"],
+                         "current_price": p.get("current_price", p["entry_price"]),
+                         "pnl_pct": round((p.get("current_price", p["entry_price"]) - p["entry_price"]) / p["entry_price"] * 100, 2),
+                         "size_usdt": p.get("trade_size", paper.amount),
+                         "leverage": paper.leverage,
+                         "entry_time": p.get("entry_unix", 0),
+                         "score": p.get("score", 0)}
+                        for sym, p in paper.positions.items()
+                    ])
                     for sym in list(paper.positions):
                         pos = paper.positions[sym]
                         current_price = pos.get("current_price", pos["entry_price"])
