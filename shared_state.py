@@ -141,24 +141,37 @@ def _resolve_run(trade: dict) -> int:
                 best_run = entry["run"]
     return best_run
 
+DEFAULT_LEVERAGE = {"accumulation": 10, "sfp": 5}
+
 def read_trade_history(limit: int = 100) -> list[dict]:
-    """Read trade history, resolving run numbers from timestamps."""
+    """Read trade history, migrating old records as needed."""
     if not TRADE_HISTORY_FILE.exists():
         return []
     try:
         with open(TRADE_HISTORY_FILE) as f:
             data = json.load(f)
-        runs = _read_runs()
-        has_runs = any(r.get("history") for r in runs.values())
-        if has_runs:
-            needs_write = False
-            for t in data:
+        needs_write = False
+
+        for t in data:
+            # Migrate run numbers
+            runs = _read_runs()
+            if any(r.get("history") for r in runs.values()):
                 correct = _resolve_run(t)
                 if t.get("run") != correct:
                     t["run"] = correct
                     needs_write = True
-            if needs_write:
-                _atomic_write(TRADE_HISTORY_FILE, data)
+
+            # Migrate unleveraged pnl_pct → leveraged
+            if "leverage" not in t and "pnl_pct" in t:
+                bot = t.get("bot", "")
+                lev = DEFAULT_LEVERAGE.get(bot, 10)
+                t["leverage"] = lev
+                t["pnl_pct"] = round(t["pnl_pct"] * lev, 2)
+                t["pnl_usd"] = round(t.get("pnl_usd", 0) * lev, 2)
+                needs_write = True
+
+        if needs_write:
+            _atomic_write(TRADE_HISTORY_FILE, data)
         return data[-limit:] if limit else data
     except (json.JSONDecodeError, OSError):
         return []
