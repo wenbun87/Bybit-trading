@@ -85,6 +85,12 @@ async def get_stats():
     return shared_state.get_stats()
 
 
+@app.post("/api/reset")
+async def reset_data():
+    shared_state.reset_all_data()
+    return {"ok": True}
+
+
 @app.get("/api/bot/{name}/logs")
 async def stream_logs(name: str):
     """Server-Sent Events stream of bot logs."""

@@ -143,6 +143,13 @@ def _resolve_run(trade: dict) -> int:
 
 DEFAULT_LEVERAGE = {"accumulation": 10, "sfp": 5}
 
+def reset_all_data():
+    """Wipe trade history, positions, and run counters for a fresh start."""
+    _ensure_dir()
+    _atomic_write(TRADE_HISTORY_FILE, [])
+    _atomic_write(POSITIONS_FILE, {})
+    _atomic_write(RUNS_FILE, {})
+
 def _recalc_pnl(t: dict):
     """Recalculate pnl_pct and pnl_usd from raw price data."""
     entry = t.get("entry_price", 0)
