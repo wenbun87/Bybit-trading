@@ -877,6 +877,13 @@ def save_results(results, filename="sfp_scan.json"):
 
 GRADE_ORDER = {"A+": 0, "A": 1, "B": 2, "C": 3, "D": 4}
 
+GRADE_SIZE_DIVISOR = {
+    "A+": 5,
+    "A": 7,
+    "B": 10,
+    "C": 10,
+}
+
 
 class PaperTrader:
     """Tracks hypothetical trades during scan-only mode."""
@@ -932,7 +939,8 @@ class PaperTrader:
             current_exposure = sum(
                 p["qty"] * p["entry_price"] for p in self.positions.values()
             )
-            notional = self.amount
+            divisor = GRADE_SIZE_DIVISOR.get(r["grade"], 10)
+            notional = self.account_balance / divisor
             remaining = max(0, self.max_exposure - current_exposure)
             if notional > remaining:
                 notional = remaining
@@ -1531,8 +1539,10 @@ def execute_sfp_trades(results, base_url, api_key, api_secret, args, traded_symb
 
         print(f"  >> {sfp_type} SFP [{grade}] on {symbol} ({tf}) @ ${price:,.6g}")
 
+        divisor = GRADE_SIZE_DIVISOR.get(grade, 10)
+        grade_size = args.account_balance / divisor
         remaining = max(0, max_exposure - current_exposure)
-        trade_notional = min(args.amount, remaining)
+        trade_notional = min(grade_size, remaining)
         if trade_notional < 5:
             print(f"     SKIP: max exposure reached (${current_exposure:,.0f}/${max_exposure:,.0f})")
             break
@@ -1760,8 +1770,9 @@ def main():
         print(f"  MSB + BB filter: ON (swing L{args.msb_swing_left}/R{args.msb_swing_right}, lookback {args.msb_lookback} bars)")
     if paper_mode:
         max_exp = args.account_balance * args.max_exposure_mult
-        print(f"  Paper trade:     ${args.amount} @ {args.leverage}x | Min grade: {args.min_grade}")
-        print(f"  Account:         ${args.account_balance:,.0f} | Max exposure: ${max_exp:,.0f} ({args.max_exposure_mult}x)")
+        print(f"  Paper trade:     Grade-based sizing @ {args.leverage}x | Min grade: {args.min_grade}")
+        print(f"  Capital:         ${args.account_balance:,.0f} | Max exposure: ${max_exp:,.0f} ({args.max_exposure_mult}x)")
+        print(f"  Size per trade:  A+=${args.account_balance/5:,.0f} | A=${args.account_balance/7:,.0f} | B=${args.account_balance/10:,.0f}")
         print(f"  Stop loss:       Structural (beyond sweep + {SL_BUFFER_PCT}% buffer)")
         print(f"  Trailing tiers:  10%→8% | 30%→6% | 100%→3% | 300%→2%")
         print(f"  Re-entry after:  {RE_ENTRY_COOLDOWN_HOURS}h cooldown")
