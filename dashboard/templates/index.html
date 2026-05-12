@@ -612,13 +612,14 @@
                         const pnlUsd = sizeUsdt !== null && pnlPct !== null
                             ? pnlPct / 100 * sizeUsdt : null;
                         const heldSec = p.entry_time ? now - p.entry_time : null;
-                        const sizeStr = sizeUsdt !== null
-                            ? `$${sizeUsdt.toLocaleString()}` : '—';
+                        const adds = p.pyramid_adds || 0;
+                        const sizeLabel = sizeUsdt !== null
+                            ? `$${sizeUsdt.toLocaleString()}${adds > 0 ? ` (${adds}↑)` : ''}` : '—';
                         rows.push(`<tr>
                             <td>${botName}</td>
                             <td style="color:#111827; font-weight:500">${p.symbol || '—'}</td>
                             <td>${(p.side || 'long').toUpperCase()}</td>
-                            <td>${sizeStr}</td>
+                            <td>${sizeLabel}</td>
                             <td>${p.entry_price !== undefined ? p.entry_price.toFixed(4) : '—'}</td>
                             <td>${p.current_price !== undefined ? p.current_price.toFixed(4) : '—'}</td>
                             <td>${pnlPct !== null ? fmtPnl(pnlPct, '%') : '—'}</td>
