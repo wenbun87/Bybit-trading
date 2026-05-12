@@ -1061,6 +1061,7 @@ class PaperTrader:
                 "leverage": self.leverage,
                 "reason": reason,
                 "entry_time": pos.get("entry_unix", 0),
+                "grade": pos.get("grade", ""),
             })
 
     def display_open_positions(self, tickers):

@@ -347,6 +347,7 @@
                     <th>Bot</th>
                     <th>Symbol</th>
                     <th>Side</th>
+                    <th>Score</th>
                     <th>Size</th>
                     <th>Entry</th>
                     <th>Current</th>
@@ -357,16 +358,19 @@
                 </tr>
             </thead>
             <tbody id="positions-tbody">
-                <tr class="empty-row"><td colspan="10">No open positions</td></tr>
+                <tr class="empty-row"><td colspan="11">No open positions</td></tr>
             </tbody>
         </table>
     </div>
 
     <!-- Trade history panel (collapsible) -->
     <div class="panel">
-        <h2 class="history-toggle" onclick="toggleHistory()">
-            Trade History <span class="history-arrow" id="history-arrow">&#9660;</span>
-        </h2>
+        <div style="display:flex; align-items:center; justify-content:space-between">
+            <h2 class="history-toggle" onclick="toggleHistory()" style="margin:0">
+                Trade History <span class="history-arrow" id="history-arrow">&#9660;</span>
+            </h2>
+            <a href="/api/trades/download" style="font-size:13px; color:#6366f1; text-decoration:none; padding:4px 12px; border:1px solid #6366f1; border-radius:6px; cursor:pointer">Download CSV</a>
+        </div>
         <div id="history-body">
             <table id="history-table">
                 <thead>
@@ -376,6 +380,7 @@
                         <th>Bot</th>
                         <th>Symbol</th>
                         <th>Side</th>
+                        <th>Score</th>
                         <th>Size</th>
                         <th>Entry</th>
                         <th>Exit</th>
@@ -385,7 +390,7 @@
                     </tr>
                 </thead>
                 <tbody id="history-tbody">
-                    <tr class="empty-row"><td colspan="11">No trade history</td></tr>
+                    <tr class="empty-row"><td colspan="12">No trade history</td></tr>
                 </tbody>
             </table>
         </div>
@@ -615,10 +620,12 @@
                         const adds = p.pyramid_adds || 0;
                         const sizeLabel = sizeUsdt !== null
                             ? `$${sizeUsdt.toLocaleString()}${adds > 0 ? ` (${adds}↑)` : ''}` : '—';
+                        const scoreLabel = p.grade ? p.grade : (p.score ? p.score.toFixed(0) : '—');
                         rows.push(`<tr>
                             <td>${botName}</td>
                             <td style="color:#111827; font-weight:500">${p.symbol || '—'}</td>
                             <td>${(p.side || 'long').toUpperCase()}</td>
+                            <td>${scoreLabel}</td>
                             <td>${sizeLabel}</td>
                             <td>${p.entry_price !== undefined ? p.entry_price.toFixed(4) : '—'}</td>
                             <td>${p.current_price !== undefined ? p.current_price.toFixed(4) : '—'}</td>
@@ -634,7 +641,7 @@
                 const tbody = document.getElementById('positions-tbody');
                 tbody.innerHTML = rows.length
                     ? rows.join('')
-                    : '<tr class="empty-row"><td colspan="10">No open positions</td></tr>';
+                    : '<tr class="empty-row"><td colspan="11">No open positions</td></tr>';
             }).catch(() => {});
         }
 
@@ -657,12 +664,14 @@
                     const sizeStr = t.size_usdt !== undefined
                         ? `$${t.size_usdt.toLocaleString()}` : '—';
                     const runLabel = t.run ? `Paper ${t.run}` : '—';
+                    const tradeScore = t.grade ? t.grade : (t.score ? t.score.toFixed(0) : '—');
                     return `<tr>
                         <td style="color:#9ca3af">${runLabel}</td>
                         <td>${date}</td>
                         <td>${t.bot || '—'}</td>
                         <td style="color:#111827; font-weight:500">${t.symbol || '—'}</td>
                         <td>${(t.side || 'long').toUpperCase()}</td>
+                        <td>${tradeScore}</td>
                         <td>${sizeStr}</td>
                         <td>${t.entry_price !== undefined ? t.entry_price.toFixed(4) : '—'}</td>
                         <td>${t.exit_price !== undefined ? t.exit_price.toFixed(4) : '—'}</td>

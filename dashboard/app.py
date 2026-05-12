@@ -5,13 +5,15 @@ Run with: python3 run_dashboard.py
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import sys
 import time
 from pathlib import Path
 from queue import Empty
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import bot_manager
@@ -89,6 +91,46 @@ async def get_stats():
 async def reset_data():
     shared_state.reset_all_data()
     return {"ok": True}
+
+
+@app.get("/api/trades/download")
+async def download_trades():
+    """Download trade history as CSV."""
+    trades = shared_state.read_trade_history(limit=9999)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "Run", "Date", "Bot", "Symbol", "Side", "Score/Grade", "Size",
+        "Entry", "Exit", "P&L %", "P&L $", "Leverage", "Reason", "Duration",
+    ])
+    for t in trades:
+        date = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t.get("closed_at", 0))) if t.get("closed_at") else ""
+        dur_sec = (t.get("closed_at", 0) - t.get("entry_time", 0)) if t.get("closed_at") and t.get("entry_time") else 0
+        dur_min = int(dur_sec / 60) if dur_sec > 0 else 0
+        score = t.get("grade") or (str(round(t["score"])) if t.get("score") else "")
+        writer.writerow([
+            f"Paper {t['run']}" if t.get("run") else "",
+            date,
+            t.get("bot", ""),
+            t.get("symbol", ""),
+            (t.get("side") or "long").upper(),
+            score,
+            t.get("size_usdt", ""),
+            t.get("entry_price", ""),
+            t.get("exit_price", ""),
+            t.get("pnl_pct", ""),
+            t.get("pnl_usd", ""),
+            t.get("leverage", ""),
+            t.get("reason", ""),
+            f"{dur_min}m",
+        ])
+    content = buf.getvalue()
+    filename = f"trades_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        content=content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @app.get("/api/bot/{name}/logs")

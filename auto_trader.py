@@ -459,6 +459,7 @@ class MomentumPaperTrader:
             "reason": reason,
             "entry_time": pos.get("entry_unix", 0),
             "pyramid_adds": adds,
+            "score": pos.get("score", 0),
         })
 
     def update_prices(self, tickers_or_base_url):
