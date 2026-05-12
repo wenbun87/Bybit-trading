@@ -1172,10 +1172,10 @@ def check_exit_signals(base_url: str, symbol: str, entry_price: float,
       - So graduation to Pool A/B starts the exit WINDOW, not the trigger.
 
     Exit signals:
-      1. Graduated to Pool A/B for 12h+ — day 1 FOMO captured, exit before day 2 dump
-      2. Graduated + funding positive OR OI dropping — immediate exit (dump starting)
-      3. Funding flipped positive on its own — squeeze fuel exhausted
-      4. OI dropping while price up — smart money unwinding
+      1. Graduated to Pool A/B for 24h+ AND profitable — momentum stale (hard exit)
+      2. Graduated + funding positive OR OI dropping + profitable — distribution (soft exit)
+      3. Funding flipped positive on its own while up 20%+ — squeeze fuel exhausted
+      4. OI dropping 10%+ while profitable — smart money unwinding
       5. Price up 200%+ from entry — extreme extension, take profit
       6. Crime pump detected — coin hit manipulation threshold
 
