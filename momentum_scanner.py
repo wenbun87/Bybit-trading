@@ -1256,24 +1256,27 @@ def check_exit_signals(base_url: str, symbol: str, entry_price: float,
         except (ValueError, TypeError):
             pass
 
-    # Exit signal 1: graduated + stale (12h+ in Pool A/B)
-    # Day 1 on leaderboard = FOMO buying = let it ride
-    # 12h+ = day 2 approaching = time to exit
+    # Exit signal 1: graduated + stale (24h+ in Pool A/B) + profitable
+    # Day 1-2 on leaderboard = FOMO buying = let it ride
+    # 24h+ = momentum exhaustion approaching
     if is_graduated and graduated_since:
         hours_graduated = (time.time() - graduated_since) / 3600
-        if hours_graduated >= 12:
-            exit_signals.append(f"Pool {current_pool} for {hours_graduated:.0f}h — day 2 dump risk")
+        if hours_graduated >= 24 and pnl_pct > 0:
+            exit_signals.append(f"Pool {current_pool} for {hours_graduated:.0f}h + profitable — momentum stale")
+        elif hours_graduated >= 24:
+            exit_signals.append(f"Pool {current_pool} for {hours_graduated:.0f}h — riding but underwater")
         else:
-            exit_signals.append(f"Pool {current_pool} for {hours_graduated:.1f}h — riding day 1 FOMO")
+            exit_signals.append(f"Pool {current_pool} for {hours_graduated:.1f}h — riding FOMO wave")
 
-    # Exit signal 2: graduated + dump signals already starting (immediate exit)
-    if is_graduated and (funding_positive or oi_dropping):
+    # Exit signal 2: graduated + weakness signals + profitable
+    # Graduation alone is NOT enough — need actual signs of distribution
+    if is_graduated and (funding_positive or oi_dropping) and pnl_pct > 0:
         reasons = []
         if funding_positive:
             reasons.append("funding positive")
         if oi_dropping:
             reasons.append("OI dropping")
-        exit_signals.append(f"Pool {current_pool} + {' + '.join(reasons)} — dump starting NOW")
+        exit_signals.append(f"Pool {current_pool} + {' + '.join(reasons)} + profitable — distribution starting")
 
     # Exit signal 3: funding flipped positive (even without graduation)
     if funding_positive and pnl_pct > 20:
@@ -1297,15 +1300,19 @@ def check_exit_signals(base_url: str, symbol: str, entry_price: float,
         if crime["blocked"]:
             exit_signals.append(f"crime pump detected: {crime['detail']}")
 
+    # Filter out informational signals (not actionable exits)
+    actionable = [s for s in exit_signals
+                  if "riding but underwater" not in s
+                  and "riding FOMO wave" not in s]
+
     # Decision logic:
     # Hard exits (any one triggers):
-    hard_exits = [s for s in exit_signals
-                  if "dump starting NOW" in s
+    hard_exits = [s for s in actionable
+                  if "momentum stale" in s
                   or "crime pump" in s
-                  or "extreme extension" in s
-                  or "day 2 dump risk" in s]
-    # Soft exits (need 2+ to trigger):
-    should_exit = len(hard_exits) >= 1 or len(exit_signals) >= 2
+                  or "extreme extension" in s]
+    # Soft exits (need 2+ actionable to trigger):
+    should_exit = len(hard_exits) >= 1 or len(actionable) >= 2
 
     reason = " | ".join(exit_signals) if exit_signals else "no exit signals"
 
