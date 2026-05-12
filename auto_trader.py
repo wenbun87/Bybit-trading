@@ -86,10 +86,12 @@ PYRAMID_MIN_HOLD_BEFORE_ADD = 1800  # must hold 30 min before first pyramid add
 
 # Score-based sizing tiers: (min_score, multiplier_of_base)
 SCORE_SIZE_TIERS = [
-    (80, 2.0),   # Strong signal → 2x base
-    (60, 1.5),   # Good signal → 1.5x base
-    (40, 1.0),   # Moderate signal → 1x base
-    (25, 0.5),   # Marginal signal → 0.5x base
+    (90, 3.0),   # Exceptional → 3x base
+    (80, 2.5),   # Very strong → 2.5x base
+    (70, 2.0),   # Strong → 2x base
+    (60, 1.5),   # Good → 1.5x base
+    (50, 1.0),   # Moderate → 1x base
+    (40, 0.75),  # Marginal → 0.75x base
 ]
 
 
