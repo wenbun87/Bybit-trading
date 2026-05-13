@@ -70,6 +70,14 @@ def get_current_run(bot_name: str) -> int:
             run = runs.get(alias, {}).get("current", 0)
     return run
 
+def is_current_run_live(bot_name: str) -> bool:
+    runs = _read_runs()
+    for name in (bot_name, _bot_aliases().get(bot_name, "")):
+        history = runs.get(name, {}).get("history", [])
+        if history:
+            return history[-1].get("live", False)
+    return False
+
 
 # ── Positions ──
 
@@ -124,6 +132,7 @@ def append_trade(bot_name: str, trade: dict):
     trade["bot"] = bot_name
     trade["closed_at"] = time.time()
     trade["run"] = get_current_run(bot_name)
+    trade["live"] = is_current_run_live(bot_name)
     history.append(trade)
     if len(history) > 500:
         history = history[-500:]

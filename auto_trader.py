@@ -881,10 +881,22 @@ def run_auto_trader(args):
                                                      api_key, api_secret, close_params)
                                 if result.get("retCode") == 0:
                                     print(f"CLOSED")
-                                    log_trade(sym, "Sell", size, exit_info["current_price"],
-                                              float(size) * exit_info["current_price"],
-                                              args.leverage, 0, {}, "exit",
+                                    exit_price = exit_info["current_price"]
+                                    pos_value = float(size) * exit_price
+                                    log_trade(sym, "Sell", size, exit_price,
+                                              pos_value, args.leverage, 0, {}, "exit",
                                               result.get("result", {}).get("orderId", "N/A"), "live")
+                                    shared_state.append_trade("accumulation", {
+                                        "symbol": sym,
+                                        "entry_price": entry_price,
+                                        "exit_price": exit_price,
+                                        "pnl_pct": round(pnl, 2),
+                                        "pnl_usd": round(pnl / 100 * pos_value, 2),
+                                        "size_usdt": pos_value,
+                                        "leverage": args.leverage,
+                                        "reason": exit_info["reason"],
+                                        "entry_time": entry_unix,
+                                    })
                                 else:
                                     print(f"FAILED: {result.get('retMsg')}")
                                 break

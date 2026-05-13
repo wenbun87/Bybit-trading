@@ -109,7 +109,7 @@ async def download_trades():
         dur_min = int(dur_sec / 60) if dur_sec > 0 else 0
         score = t.get("grade") or (str(round(t["score"])) if t.get("score") else "")
         writer.writerow([
-            f"Paper {t['run']}" if t.get("run") else "",
+            f"{'Live' if t.get('live') else 'Paper'} {t['run']}" if t.get("run") else "",
             date,
             t.get("bot", ""),
             t.get("symbol", ""),

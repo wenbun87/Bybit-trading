@@ -745,7 +745,7 @@
                     const pnlUsd = t.pnl_usd !== undefined ? t.pnl_usd : null;
                     const sizeStr = t.size_usdt !== undefined
                         ? `$${t.size_usdt.toLocaleString()}` : '—';
-                    const runLabel = t.run ? `Paper ${t.run}` : '—';
+                    const runLabel = t.run ? `${t.live ? 'Live' : 'Paper'} ${t.run}` : '—';
                     const tradeScore = t.grade ? t.grade : (t.score ? t.score.toFixed(0) : '—');
                     return `<tr>
                         <td style="color:#9ca3af">${runLabel}</td>
