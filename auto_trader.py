@@ -71,7 +71,7 @@ DEFAULT_MIN_SCORE = 40          # ELEVATED threshold (catch accumulation earlier
 DEFAULT_INTERVAL_MIN = 5        # scan every 5 minutes
 MAX_TRADES_PER_CYCLE = 2        # max trades per scan cycle
 MAX_TRADES_PER_DAY = 6          # max trades in 24 hours
-DEFAULT_LEVERAGE = 10           # 10x leverage
+DEFAULT_LEVERAGE = 5            # 5x leverage
 RE_ENTRY_COOLDOWN_HOURS = 6     # allow re-entry on same symbol after this cooldown
 MIN_HOLD_SECONDS = 1800         # 30 min minimum hold before signal-based exits (hard exit still active)
 
@@ -662,6 +662,53 @@ def display_live_pnl(base_url, api_key, api_secret):
     print(f"  {'='*90}")
 
 
+def _close_live_position(base_url, api_key, api_secret, sym, live_positions,
+                         leverage, entry_price, entry_unix, current_price, pnl, reason,
+                         live_tracker=None):
+    """Close a live position on Bybit, record to trade history and live_tracker."""
+    for p in live_positions:
+        if p.get("symbol") != sym:
+            continue
+        size = p.get("size", "0")
+        pos_idx = int(p.get("positionIdx", 0))
+        print(f"    Closing {size} {sym}...", end=" ")
+        close_params = {
+            "category": "linear", "symbol": sym,
+            "side": "Sell", "orderType": "Market",
+            "qty": size, "positionIdx": pos_idx,
+            "reduceOnly": True,
+        }
+        result = api_request(base_url, "POST", "/v5/order/create",
+                             api_key, api_secret, close_params)
+        if result.get("retCode") == 0:
+            print(f"CLOSED")
+            pos_value = float(size) * current_price
+            total_size = pos_value
+            score = 0
+            if live_tracker and sym in live_tracker.positions:
+                total_size = live_tracker._total_size(live_tracker.positions[sym])
+                score = live_tracker.positions[sym].get("score", 0)
+                live_tracker.positions.pop(sym, None)
+                live_tracker.save_state()
+            log_trade(sym, "Sell", size, current_price, pos_value, leverage,
+                      0, {}, "exit", result.get("result", {}).get("orderId", "N/A"), "live")
+            shared_state.append_trade("accumulation", {
+                "symbol": sym,
+                "entry_price": entry_price,
+                "exit_price": current_price,
+                "pnl_pct": round(pnl, 2),
+                "pnl_usd": round(pnl / 100 * total_size, 2),
+                "size_usdt": total_size,
+                "leverage": leverage,
+                "reason": reason,
+                "entry_time": entry_unix,
+                "score": score,
+            })
+        else:
+            print(f"FAILED: {result.get('retMsg')}")
+        break
+
+
 # ──────────────────────────────────────────────
 # Session state
 # ──────────────────────────────────────────────
@@ -730,13 +777,16 @@ def run_auto_trader(args):
     init_trade_log()
 
     paper = None if args.live else MomentumPaperTrader(args.amount, args.leverage)
-    if paper is not None:
-        saved_traded_symbols = paper.load_state()
+    # Live tracker mirrors paper interface for score/pyramid/dashboard publishing
+    live_tracker = MomentumPaperTrader(args.amount, args.leverage) if args.live else None
+    tracker = paper or live_tracker
+    if tracker is not None:
+        saved_traded_symbols = tracker.load_state()
         if saved_traded_symbols:
             session.traded_symbols.update(saved_traded_symbols)
-        paper._traded_symbols_ref = session.traded_symbols
+        tracker._traded_symbols_ref = session.traded_symbols
 
-    base_size = args.account_balance / 10
+    base_size = args.account_balance / 5
     print(f"\n{'='*70}")
     print(f"  ACCUMULATION AUTO-TRADER [{env_label}] [{mode}]")
     print(f"{'='*70}")
@@ -784,55 +834,52 @@ def run_auto_trader(args):
         print(f"\n--- Cycle {cycle} | {now} | {mode} ---\n")
 
         # ── EXIT CHECK: check open positions for graduation/exit signals ──
-        open_symbols = list(paper.positions.keys()) if paper else []
-        if not paper and args.live:
+        open_symbols = list(tracker.positions.keys()) if tracker else []
+        if args.live:
             live_positions = get_open_positions(base_url, api_key, api_secret)
-            open_symbols = [p.get("symbol", "") for p in live_positions
-                           if float(p.get("size", 0)) > 0]
 
         if open_symbols:
             print(f"  Checking exit signals for {len(open_symbols)} open position(s)...\n")
-            # graduation_tracker shared between paper and live
-            graduation_tracker = paper.graduated_at if paper else {}
+            graduation_tracker = tracker.graduated_at if tracker else {}
 
             for sym in open_symbols:
-                if paper and sym in paper.positions:
-                    entry_price = paper.positions[sym]["entry_price"]
-                    entry_unix = paper.positions[sym].get("entry_unix", 0)
+                if tracker and sym in tracker.positions:
+                    entry_price = tracker.positions[sym]["entry_price"]
+                    entry_unix = tracker.positions[sym].get("entry_unix", 0)
                 else:
                     entry_price = 0
                     entry_unix = 0
-                    if args.live:
-                        for p in live_positions:
-                            if p.get("symbol") == sym:
-                                entry_price = float(p.get("avgPrice", "0") or "0")
-                                break
 
                 if entry_price <= 0:
                     continue
 
                 # Hard P&L exit — check BEFORE signals to catch dumps that never reach Pool A/B
-                if paper and sym in paper.positions:
-                    current_price = paper.positions[sym].get("current_price", entry_price)
-                elif args.live:
-                    current_price = 0.0
+                if tracker and sym in tracker.positions:
+                    current_price = tracker.positions[sym].get("current_price", entry_price)
+                else:
+                    current_price = entry_price
+                # For live, use real mark price if available
+                if args.live and live_positions:
                     for p in live_positions:
                         if p.get("symbol") == sym:
                             current_price = float(p.get("markPrice", "0") or "0")
                             break
-                else:
-                    current_price = entry_price
                 if current_price > 0:
                     pnl = (current_price - entry_price) / entry_price * 100
                     if pnl <= -15:
-                        # Hard exit — P&L breach, don't wait for signals
-                        paper.exit(sym, current_price, f"HARD EXIT: P&L {pnl:.1f}% breached -15% threshold")
+                        reason = f"HARD EXIT: P&L {pnl:.1f}% breached -15% threshold"
+                        if paper:
+                            paper.exit(sym, current_price, reason)
+                        elif args.live:
+                            _close_live_position(base_url, api_key, api_secret, sym,
+                                                 live_positions, args.leverage, entry_price,
+                                                 entry_unix, current_price, pnl, reason, live_tracker)
                         continue
 
                 # Pyramid check — add to winners during scan cycle
-                if paper and sym in paper.positions and current_price > 0:
-                    paper.pyramid_add(sym, current_price)
-                    entry_price = paper.positions[sym]["entry_price"]
+                if tracker and sym in tracker.positions and current_price > 0:
+                    tracker.pyramid_add(sym, current_price)
+                    entry_price = tracker.positions[sym]["entry_price"]
 
                 graduated_since = graduation_tracker.get(sym)
                 exit_info = check_exit_signals(base_url, sym, entry_price, graduated_since)
@@ -866,40 +913,10 @@ def run_auto_trader(args):
                         if sym in paper.graduated_at:
                             del paper.graduated_at[sym]
                     elif args.live:
-                        for p in live_positions:
-                            if p.get("symbol") == sym:
-                                size = p.get("size", "0")
-                                pos_idx = int(p.get("positionIdx", 0))
-                                print(f"    Closing {size} {sym}...", end=" ")
-                                close_params = {
-                                    "category": "linear", "symbol": sym,
-                                    "side": "Sell", "orderType": "Market",
-                                    "qty": size, "positionIdx": pos_idx,
-                                    "reduceOnly": True,
-                                }
-                                result = api_request(base_url, "POST", "/v5/order/create",
-                                                     api_key, api_secret, close_params)
-                                if result.get("retCode") == 0:
-                                    print(f"CLOSED")
-                                    exit_price = exit_info["current_price"]
-                                    pos_value = float(size) * exit_price
-                                    log_trade(sym, "Sell", size, exit_price,
-                                              pos_value, args.leverage, 0, {}, "exit",
-                                              result.get("result", {}).get("orderId", "N/A"), "live")
-                                    shared_state.append_trade("accumulation", {
-                                        "symbol": sym,
-                                        "entry_price": entry_price,
-                                        "exit_price": exit_price,
-                                        "pnl_pct": round(pnl, 2),
-                                        "pnl_usd": round(pnl / 100 * pos_value, 2),
-                                        "size_usdt": pos_value,
-                                        "leverage": args.leverage,
-                                        "reason": exit_info["reason"],
-                                        "entry_time": entry_unix,
-                                    })
-                                else:
-                                    print(f"FAILED: {result.get('retMsg')}")
-                                break
+                        _close_live_position(base_url, api_key, api_secret, sym,
+                                             live_positions, args.leverage, entry_price,
+                                             entry_unix, exit_info["current_price"], pnl,
+                                             exit_info["reason"], live_tracker)
                         if sym in graduation_tracker:
                             del graduation_tracker[sym]
                 else:
@@ -1028,6 +1045,8 @@ def run_auto_trader(args):
                             print(f"FILLED (orderId: {order_id})")
                             log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                                       score, signals, "filled", order_id, "live")
+                            if live_tracker:
+                                live_tracker.enter(symbol, price, score, signals, trade_size=trade_size)
                             session.record_trade(symbol, est_value * args.leverage)
                             trades_this_cycle += 1
                         elif ret_code == 10001 and "position idx" in result.get("retMsg", "").lower():
@@ -1047,6 +1066,8 @@ def run_auto_trader(args):
                                 print(f"FILLED (orderId: {oid})")
                                 log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                                           score, signals, "filled", oid, "live")
+                                if live_tracker:
+                                    live_tracker.enter(symbol, price, score, signals, trade_size=trade_size)
                                 session.record_trade(symbol, est_value * args.leverage)
                                 trades_this_cycle += 1
                             else:
@@ -1079,22 +1100,21 @@ def run_auto_trader(args):
                  "pyramid_adds": p.get("pyramid_adds", 0)}
                 for sym, p in paper.positions.items()
             ])
-        elif args.live:
+        elif args.live and live_tracker:
+            cycle_tickers = fetch_all_linear_tickers(base_url)
+            live_tracker.update_prices(cycle_tickers)
             display_live_pnl(base_url, api_key, api_secret)
-            live_positions = get_open_positions(base_url, api_key, api_secret)
             shared_state.write_positions("accumulation", [
-                {"symbol": p.get("symbol", ""), "side": "long" if p.get("side") == "Buy" else "short",
-                 "entry_price": float(p.get("avgPrice", "0") or "0"),
-                 "current_price": float(p.get("markPrice", "0") or "0"),
-                 "pnl_pct": round(((float(p.get("markPrice", "0") or "0") - float(p.get("avgPrice", "0") or "0"))
-                                   / float(p.get("avgPrice", "1") or "1") * 100)
-                                  if p.get("side") == "Buy" else
-                                  ((float(p.get("avgPrice", "0") or "0") - float(p.get("markPrice", "0") or "0"))
-                                   / float(p.get("avgPrice", "1") or "1") * 100), 2),
-                 "size_usdt": float(p.get("positionValue", "0") or "0"),
-                 "leverage": int(p.get("leverage", "1") or "1"),
-                 "entry_time": 0}
-                for p in live_positions if float(p.get("size", "0") or "0") > 0
+                {"symbol": sym, "side": "long",
+                 "entry_price": p["entry_price"],
+                 "current_price": p.get("current_price", p["entry_price"]),
+                 "pnl_pct": round((p.get("current_price", p["entry_price"]) - p["entry_price"]) / p["entry_price"] * 100, 2),
+                 "size_usdt": live_tracker._total_size(p),
+                 "leverage": live_tracker.leverage,
+                 "entry_time": p.get("entry_unix", 0),
+                 "score": p.get("score", 0),
+                 "pyramid_adds": p.get("pyramid_adds", 0)}
+                for sym, p in live_tracker.positions.items()
             ])
 
         # Session summary
@@ -1111,58 +1131,57 @@ def run_auto_trader(args):
             while waited < total_wait:
                 time.sleep(min(exit_check_interval, total_wait - waited))
                 waited += exit_check_interval
-                if waited < total_wait and args.live:
-                    live_pos = get_open_positions(base_url, api_key, api_secret)
-                    if live_pos:
-                        shared_state.write_positions("accumulation", [
-                            {"symbol": p.get("symbol", ""), "side": "long" if p.get("side") == "Buy" else "short",
-                             "entry_price": float(p.get("avgPrice", "0") or "0"),
-                             "current_price": float(p.get("markPrice", "0") or "0"),
-                             "pnl_pct": round(((float(p.get("markPrice", "0") or "0") - float(p.get("avgPrice", "0") or "0"))
-                                               / float(p.get("avgPrice", "1") or "1") * 100)
-                                              if p.get("side") == "Buy" else
-                                              ((float(p.get("avgPrice", "0") or "0") - float(p.get("markPrice", "0") or "0"))
-                                               / float(p.get("avgPrice", "1") or "1") * 100), 2),
-                             "size_usdt": float(p.get("positionValue", "0") or "0"),
-                             "leverage": int(p.get("leverage", "1") or "1"),
-                             "entry_time": 0}
-                            for p in live_pos if float(p.get("size", "0") or "0") > 0
-                        ])
-                if waited < total_wait and paper and paper.positions:
+                if waited < total_wait and tracker and tracker.positions:
                     print(f"\n  [Price check — {(total_wait - waited)//60}m until next scan]")
                     tickers = fetch_all_linear_tickers(base_url)
-                    paper.update_prices(tickers)
+                    tracker.update_prices(tickers)
                     # Update dashboard positions
                     shared_state.write_positions("accumulation", [
                         {"symbol": sym, "side": "long",
                          "entry_price": p["entry_price"],
                          "current_price": p.get("current_price", p["entry_price"]),
                          "pnl_pct": round((p.get("current_price", p["entry_price"]) - p["entry_price"]) / p["entry_price"] * 100, 2),
-                         "size_usdt": paper._total_size(p),
-                         "leverage": paper.leverage,
+                         "size_usdt": tracker._total_size(p),
+                         "leverage": tracker.leverage,
                          "entry_time": p.get("entry_unix", 0),
                          "score": p.get("score", 0),
                          "pyramid_adds": p.get("pyramid_adds", 0)}
-                        for sym, p in paper.positions.items()
+                        for sym, p in tracker.positions.items()
                     ])
-                    for sym in list(paper.positions):
-                        pos = paper.positions[sym]
+                    # Fetch live positions for exit execution
+                    live_pos_check = get_open_positions(base_url, api_key, api_secret) if args.live else []
+                    for sym in list(tracker.positions):
+                        pos = tracker.positions[sym]
                         current_price = pos.get("current_price", pos["entry_price"])
                         pnl = (current_price - pos["entry_price"]) / pos["entry_price"] * 100
                         if pnl <= -15:
-                            paper.exit(sym, current_price, f"HARD EXIT: P&L {pnl:.1f}% breached -15%")
+                            reason = f"HARD EXIT: P&L {pnl:.1f}% breached -15%"
+                            if paper:
+                                paper.exit(sym, current_price, reason)
+                            elif args.live:
+                                _close_live_position(base_url, api_key, api_secret, sym,
+                                                     live_pos_check, args.leverage,
+                                                     pos["entry_price"], pos.get("entry_unix", 0),
+                                                     current_price, pnl, reason, live_tracker)
                             continue
-                        # Pyramid check — add to winners
-                        paper.pyramid_add(sym, current_price)
+                        tracker.pyramid_add(sym, current_price)
                         held_sec = time.time() - pos.get("entry_unix", 0)
                         if held_sec < MIN_HOLD_SECONDS:
                             continue
                         exit_info = check_exit_signals(base_url, sym, pos["entry_price"],
-                                                       paper.graduated_at.get(sym))
-                        if exit_info["graduated"] and sym not in paper.graduated_at:
-                            paper.graduated_at[sym] = time.time()
+                                                       tracker.graduated_at.get(sym))
+                        if exit_info["graduated"] and sym not in tracker.graduated_at:
+                            tracker.graduated_at[sym] = time.time()
                         if exit_info["exit"]:
-                            paper.exit(sym, exit_info["current_price"], exit_info["reason"])
+                            if paper:
+                                paper.exit(sym, exit_info["current_price"], exit_info["reason"])
+                            elif args.live:
+                                _close_live_position(base_url, api_key, api_secret, sym,
+                                                     live_pos_check, args.leverage,
+                                                     pos["entry_price"], pos.get("entry_unix", 0),
+                                                     exit_info["current_price"],
+                                                     exit_info.get("pnl_pct", 0),
+                                                     exit_info["reason"], live_tracker)
         except KeyboardInterrupt:
             if paper:
                 paper.display_summary()
