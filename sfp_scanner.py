@@ -921,9 +921,10 @@ class PaperTrader:
         return f"{d}d{h}h" if h else f"{d}d"
 
     def enter_signals(self, results):
-        """Open paper positions on qualifying signals with structural stops."""
+        """Open positions on qualifying signals with structural stops.
+        Returns list of entry dicts for live order execution."""
         grade_ok = GRADE_ORDER.get(self.min_grade, 2)
-        entered = 0
+        entries = []
         now = time.time()
 
         for r in results:
@@ -973,16 +974,22 @@ class PaperTrader:
                 "trail_low": entry_price if side == "short" else None,
             }
             self.traded_symbols[symbol] = now
-            entered += 1
             action = "LONG" if side == "long" else "SHORT"
-            print(f"  [PAPER] {action} {symbol} @ {entry_price:,.6g} | "
+            print(f"  [{action}] {symbol} @ {entry_price:,.6g} | "
                   f"Grade {r['grade']} | ${notional:.0f} x{self.leverage} | "
                   f"SL: {sl_price:,.4g} ({sl_dist_pct:.1f}% away, beyond sweep {sweep_price:,.4g})")
+            entries.append({
+                "symbol": symbol, "side": side, "entry_price": entry_price,
+                "qty": qty, "notional": notional, "grade": r["grade"],
+                "sl_price": sl_price, "sfp_type": sfp["type"],
+                "tf": r.get("count_tf", "?"),
+            })
 
-        return entered
+        return entries
 
     def update_prices(self, tickers):
-        """Update positions with latest prices; close if stopped out."""
+        """Update positions with latest prices; close if stopped out.
+        Returns list of closed position dicts for live order execution."""
         price_map = {}
         for t in tickers:
             try:
@@ -1028,6 +1035,7 @@ class PaperTrader:
                 if drawdown >= trail_pct:
                     to_close.append((symbol, price, pnl_pct, f"trailing stop ({trail_pct}%)"))
 
+        closed = []
         for symbol, price, pnl_pct, reason in to_close:
             pos = self.positions.pop(symbol)
             notional = pos.get("qty", self.amount / pos["entry_price"]) * pos["entry_price"]
@@ -1048,7 +1056,7 @@ class PaperTrader:
                 "exit_unix": time.time(),
             })
             tag = "+" if pnl_usd >= 0 else ""
-            print(f"  [PAPER EXIT] {symbol} | {reason} | "
+            print(f"  [EXIT] {symbol} | {reason} | "
                   f"{tag}${pnl_usd:,.2f} ({pnl_pct:+.1f}%)")
             shared_state.append_trade("sfp", {
                 "symbol": symbol,
@@ -1063,6 +1071,11 @@ class PaperTrader:
                 "entry_time": pos.get("entry_unix", 0),
                 "grade": pos.get("grade", ""),
             })
+            closed.append({
+                "symbol": symbol, "side": pos["side"],
+                "qty": pos.get("qty", 0), "reason": reason,
+            })
+        return closed
 
     def display_open_positions(self, tickers):
         """Show current paper positions with live P&L."""
@@ -1311,335 +1324,99 @@ def log_sfp_exit(symbol, side, entry_price, profit_pct, tier, action):
         csv.writer(f).writerow([now, symbol, side, entry_price, profit_pct, tier, action])
 
 
-def load_sfp_state():
-    if Path(SFP_STATE_FILE).exists():
-        with open(SFP_STATE_FILE) as f:
-            return json.load(f)
-    return {}
+def _place_sfp_order(base_url, api_key, api_secret, entry, leverage):
+    """Place a live SFP order on Bybit. Returns True on success."""
+    symbol = entry["symbol"]
+    side = "Buy" if entry["side"] == "long" else "Sell"
+    sl_price = entry.get("sl_price")
+
+    instrument = get_instrument_info(base_url, symbol)
+    if not instrument:
+        print(f"     SKIP: no instrument info for {symbol}")
+        return False
+
+    qty = calculate_qty(entry["notional"], entry["entry_price"], instrument)
+    if not qty:
+        print(f"     SKIP: qty too small for {symbol}")
+        return False
+
+    est_value = float(qty) * entry["entry_price"]
+    sl_msg = f"SL ${sl_price:,.6g}" if sl_price else "no SL"
+    print(f"     Order: {side} {qty} {symbol} (~${est_value:,.2f}) @ {leverage}x | {sl_msg}")
+
+    auth_request(base_url, "POST", "/v5/position/set-leverage",
+                 api_key, api_secret, {
+                     "category": "linear", "symbol": symbol,
+                     "buyLeverage": str(leverage), "sellLeverage": str(leverage),
+                 })
+    time.sleep(0.3)
+
+    print(f"     Placing order...", end=" ")
+    order_params = {
+        "category": "linear", "symbol": symbol, "side": side,
+        "orderType": "Market", "qty": qty, "positionIdx": 0,
+        "orderLinkId": f"sfp_{symbol}_{int(time.time())}",
+    }
+    if sl_price is not None:
+        order_params["stopLoss"] = str(round(sl_price, 6))
+    result = auth_request(base_url, "POST", "/v5/order/create",
+                          api_key, api_secret, order_params)
+    ret = result.get("retCode", -1)
+    oid = result.get("result", {}).get("orderId", "N/A")
+
+    if ret == 0:
+        print(f"FILLED (orderId: {oid})")
+        log_sfp_trade(symbol, side, qty, entry["entry_price"], est_value, leverage,
+                      entry["grade"], entry["sfp_type"], entry["tf"], "filled", oid, "live")
+        return True
+    elif ret == 10001 and "position idx" in result.get("retMsg", "").lower():
+        pos_idx = 1 if side == "Buy" else 2
+        order_params["positionIdx"] = pos_idx
+        order_params["orderLinkId"] = f"sfp_{symbol}_{int(time.time())}"
+        time.sleep(0.3)
+        r2 = auth_request(base_url, "POST", "/v5/order/create",
+                          api_key, api_secret, order_params)
+        if r2.get("retCode") == 0:
+            oid2 = r2.get("result", {}).get("orderId", "N/A")
+            print(f"FILLED hedge (orderId: {oid2})")
+            log_sfp_trade(symbol, side, qty, entry["entry_price"], est_value, leverage,
+                          entry["grade"], entry["sfp_type"], entry["tf"], "filled", oid2, "live")
+            return True
+        print(f"FAILED: {r2.get('retMsg')}")
+    else:
+        print(f"FAILED: {result.get('retMsg')}")
+    return False
 
 
-def save_sfp_state(state):
-    with open(SFP_STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+def _close_sfp_position(base_url, api_key, api_secret, closed):
+    """Close a live SFP position on Bybit."""
+    symbol = closed["symbol"]
+    side = closed["side"]
+    close_side = "Sell" if side == "long" else "Buy"
 
-
-def get_current_tier(profit_pct):
-    active = TRAILING_TIERS[0]
-    for min_p, trail in TRAILING_TIERS:
-        if profit_pct >= min_p:
-            active = (min_p, trail)
-    return active
-
-
-def fetch_ticker_volumes(base_url, symbols):
-    """Fetch 24h turnover for a list of symbols (single API call)."""
-    url = f"{base_url}/v5/market/tickers?category=linear"
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            tickers = data.get("result", {}).get("list", [])
-            wanted = set(symbols)
-            return {
-                t["symbol"]: float(t.get("turnover24h", 0))
-                for t in tickers if t.get("symbol") in wanted
-            }
-    except Exception:
-        return {}
-
-
-def manage_sfp_positions(base_url, api_key, api_secret, initial_sl_pct, is_live, pos_state):
-    """Check open positions and manage trailing stops."""
-    data = auth_request(base_url, "GET", "/v5/position/list",
-                        api_key, api_secret, {"category": "linear", "settleCoin": "USDT"})
-    if data.get("retCode") != 0:
-        return pos_state
-    positions = [p for p in data.get("result", {}).get("list", [])
-                 if float(p.get("size", "0") or "0") > 0]
-
-    if not positions:
-        if pos_state:
-            pos_state = {}
-            save_sfp_state(pos_state)
-        return pos_state
-
-    # Fetch 24h volumes for all open position symbols
-    pos_symbols = [p.get("symbol", "") for p in positions]
-    volumes = fetch_ticker_volumes(base_url, pos_symbols)
-
-    total_unrealised = 0.0
-    print(f"\n  {'='*90}")
-    print(f"  OPEN POSITIONS — {len(positions)} active")
-    print(f"  {'='*90}")
-    active_symbols = set()
-
-    for pos in positions:
-        symbol = pos.get("symbol", "")
-        side = pos.get("side", "")
-        size = float(pos.get("size", "0") or "0")
-        entry_price = float(pos.get("avgPrice", "0") or "0")
-        mark_price = float(pos.get("markPrice", "0") or "0")
-        position_idx = int(pos.get("positionIdx", "0") or "0")
-        current_sl = float(pos.get("stopLoss", "0") or "0")
-        current_trail = float(pos.get("trailingStop", "0") or "0")
-        leverage = pos.get("leverage", "?")
-        unrealised_pnl = float(pos.get("unrealisedPnl", "0") or "0")
-        position_value = float(pos.get("positionValue", "0") or "0")
-
-        if entry_price <= 0 or mark_price <= 0:
+    positions = auth_request(base_url, "GET", "/v5/position/list",
+                             api_key, api_secret, {"category": "linear", "symbol": symbol})
+    for p in positions.get("result", {}).get("list", []):
+        sz = float(p.get("size", "0") or "0")
+        if sz <= 0:
             continue
-        active_symbols.add(symbol)
-        total_unrealised += unrealised_pnl
-
-        if side == "Buy":
-            profit_pct = (mark_price - entry_price) / entry_price * 100
+        pos_side = p.get("side", "")
+        if (side == "long" and pos_side != "Buy") or (side == "short" and pos_side != "Sell"):
+            continue
+        pos_idx = int(p.get("positionIdx", 0))
+        print(f"    Closing {sz} {symbol}...", end=" ")
+        result = auth_request(base_url, "POST", "/v5/order/create",
+                              api_key, api_secret, {
+                                  "category": "linear", "symbol": symbol,
+                                  "side": close_side, "orderType": "Market",
+                                  "qty": str(sz), "positionIdx": pos_idx,
+                                  "reduceOnly": True,
+                              })
+        if result.get("retCode") == 0:
+            print("CLOSED")
         else:
-            profit_pct = (entry_price - mark_price) / entry_price * 100
-
-        lev = float(leverage) if leverage != "?" else 1
-        _, tier_trail_pct = get_current_tier(profit_pct)
-        state_key = f"{symbol}_{side}"
-
-        if current_sl > 0:
-            if side == "Buy":
-                sl_dist_pct = (mark_price - current_sl) / mark_price * 100
-            else:
-                sl_dist_pct = (current_sl - mark_price) / mark_price * 100
-            sl_str = f"${current_sl:,.6g} ({sl_dist_pct:.1f}% away)"
-        else:
-            sl_str = "NONE ⚠"
-
-        trail_str = f"${current_trail:,.6g}" if current_trail > 0 else "OFF"
-        tier_str = f"{tier_trail_pct}%" if tier_trail_pct > 0 else "SL only"
-        pnl_color = "+" if unrealised_pnl >= 0 else ""
-        vol_24h = volumes.get(symbol, 0)
-        vol_str = f"${vol_24h/1e6:,.1f}M" if vol_24h >= 1e6 else f"${vol_24h:,.0f}"
-
-        print(f"\n  {symbol} {side} {lev:.0f}x  |  24h Vol: {vol_str}")
-        print(f"    Entry: ${entry_price:,.6g}  →  Now: ${mark_price:,.6g}  |  Size: {size} (~${position_value:,.2f})")
-        print(f"    P&L:   {pnl_color}${unrealised_pnl:,.2f} USDT  ({profit_pct:+.2f}% / {profit_pct*lev:+.1f}% with leverage)")
-        print(f"    SL:    {sl_str}  |  Trail: {trail_str}  |  Tier: {tier_str}")
-
-        ps = pos_state.get(state_key, {"initial_sl_set": False, "current_tier_pct": 0, "highest_profit": 0})
-        if profit_pct > ps.get("highest_profit", 0):
-            ps["highest_profit"] = profit_pct
-
-        action = None
-        new_sl = None
-        new_trail = None
-
-        if not ps["initial_sl_set"] and current_sl == 0:
-            if initial_sl_pct > 0:
-                if side == "Buy":
-                    new_sl = round(entry_price * (1 - initial_sl_pct / 100), 6)
-                else:
-                    new_sl = round(entry_price * (1 + initial_sl_pct / 100), 6)
-                action = f"SET initial SL at ${new_sl:,.6g} (-{initial_sl_pct}%)"
-            ps["initial_sl_set"] = True
-        elif tier_trail_pct > 0 and tier_trail_pct != ps.get("current_tier_pct", 0):
-            if tier_trail_pct < ps.get("current_tier_pct", 999) or ps.get("current_tier_pct", 0) == 0:
-                new_trail = round(mark_price * tier_trail_pct / 100, 6)
-                label = "ACTIVATE" if ps.get("current_tier_pct", 0) == 0 else "TIGHTEN"
-                action = f"{label} trail to {tier_trail_pct}% (${new_trail:,.6g} distance)"
-                ps["current_tier_pct"] = tier_trail_pct
-
-        if action:
-            print(f"    >> {action}")
-            if is_live:
-                params = {"category": "linear", "symbol": symbol, "positionIdx": position_idx}
-                if new_sl is not None:
-                    params["stopLoss"] = str(new_sl)
-                if new_trail is not None:
-                    params["trailingStop"] = str(new_trail)
-                result = auth_request(base_url, "POST", "/v5/position/trading-stop",
-                                      api_key, api_secret, params)
-                ret = result.get("retCode", -1)
-                if ret == 0:
-                    print(f"    >> APPLIED")
-                elif ret == 10001 and "position idx" in result.get("retMsg", "").lower():
-                    alt_idx = 1 if side == "Buy" else 2
-                    time.sleep(0.3)
-                    params["positionIdx"] = alt_idx
-                    r2 = auth_request(base_url, "POST", "/v5/position/trading-stop",
-                                      api_key, api_secret, params)
-                    print(f"    >> {'APPLIED (hedge)' if r2.get('retCode') == 0 else 'FAILED: ' + r2.get('retMsg', '')}")
-                else:
-                    print(f"    >> FAILED: {result.get('retMsg')}")
-                log_sfp_exit(symbol, side, entry_price, profit_pct, tier_trail_pct, action)
-            else:
-                print(f"    >> [DRY-RUN] Would apply")
-        else:
-            print(f"    >> OK")
-
-        pos_state[state_key] = ps
-
-    # Total P&L summary
-    pnl_sign = "+" if total_unrealised >= 0 else ""
-    print(f"\n  {'─'*50}")
-    print(f"  TOTAL UNREALISED P&L:  {pnl_sign}${total_unrealised:,.2f} USDT")
-    print(f"  {'─'*50}")
-
-    closed = [k for k in list(pos_state.keys()) if k.split("_")[0] not in active_symbols]
-    for k in closed:
-        print(f"  Position closed: {k}")
-        del pos_state[k]
-    save_sfp_state(pos_state)
-    return pos_state
-
-
-def execute_sfp_trades(results, base_url, api_key, api_secret, args, traded_symbols):
-    """Trade the best SFP signals. traded_symbols is dict[symbol -> last_trade_ts]."""
-    min_grade = args.min_grade.upper()
-    now_ts = time.time()
-
-    def in_cooldown(sym):
-        if sym not in traded_symbols:
-            return False, 0
-        elapsed = (now_ts - traded_symbols[sym]) / 3600
-        return (elapsed < RE_ENTRY_COOLDOWN_HOURS), elapsed
-
-    tradeable = []
-    for r in results:
-        if GRADE_ORDER.get(r["grade"], 99) > GRADE_ORDER.get(min_grade, 2):
-            continue
-        if r["sfp"]["candles_ago"] > 1:
-            continue
-        in_cd, _ = in_cooldown(r["symbol"])
-        if in_cd:
-            continue
-        tradeable.append(r)
-
-    if not tradeable:
-        print(f"\n  No tradeable SFPs (grade {min_grade}+ and fresh, no cooldown).\n")
-        return traded_symbols
-
-    max_exposure = args.account_balance * args.max_exposure_mult
-    current_exposure = 0
-    if args.live:
-        pos_data = auth_request(base_url, "GET", "/v5/position/list",
-                                api_key, api_secret,
-                                {"category": "linear", "settleCoin": "USDT"})
-        for p in pos_data.get("result", {}).get("list", []):
-            sz = float(p.get("size", "0") or "0")
-            mp = float(p.get("markPrice", "0") or "0")
-            if sz > 0:
-                current_exposure += sz * mp
-
-    trades_this_cycle = 0
-    for r in tradeable:
-        if trades_this_cycle >= MAX_TRADES_PER_CYCLE:
-            break
-
-        symbol = r["symbol"]
-        grade = r["grade"]
-        sfp = r["sfp"]
-        sfp_type = sfp["type"]
-        side = "Sell" if sfp_type == "BEARISH" else "Buy"
-        price = r["lastPrice"]
-        tf = r.get("count_tf", "?")
-
-        print(f"  >> {sfp_type} SFP [{grade}] on {symbol} ({tf}) @ ${price:,.6g}")
-
-        divisor = GRADE_SIZE_DIVISOR.get(grade, 10)
-        grade_size = args.account_balance / divisor
-        remaining = max(0, max_exposure - current_exposure)
-        trade_notional = min(grade_size, remaining)
-        if trade_notional < 5:
-            print(f"     SKIP: max exposure reached (${current_exposure:,.0f}/${max_exposure:,.0f})")
-            break
-
-        instrument = get_instrument_info(base_url, symbol)
-        if not instrument:
-            print(f"     SKIP: no instrument info")
-            continue
-
-        qty = calculate_qty(trade_notional, price, instrument)
-        if not qty:
-            print(f"     SKIP: qty too small")
-            continue
-
-        est_value = float(qty) * price
-        print(f"     Order: {side.upper()} {qty} {symbol} (~${est_value:,.2f}) @ {args.leverage}x")
-
-        if args.no_stops:
-            sl_price = None
-        elif side == "Buy":
-            sl_price = round(price * (1 - args.initial_sl / 100), 6)
-        else:
-            sl_price = round(price * (1 + args.initial_sl / 100), 6)
-
-        sl_msg = (f"NO SL (zero-hero)" if sl_price is None
-                  else f"with SL at ${sl_price:,.6g} (-{args.initial_sl}%)")
-
-        if not args.live:
-            print(f"     [DRY-RUN] Would place order {sl_msg}")
-            log_sfp_trade(symbol, side, qty, price, est_value, args.leverage,
-                          grade, sfp_type, tf, "dry-run", "N/A", "dry-run")
-            traded_symbols[symbol] = time.time()
-            trades_this_cycle += 1
-            current_exposure += est_value
-        else:
-            auth_request(base_url, "POST", "/v5/position/set-leverage",
-                         api_key, api_secret, {
-                             "category": "linear", "symbol": symbol,
-                             "buyLeverage": str(args.leverage), "sellLeverage": str(args.leverage),
-                         })
-            time.sleep(0.3)
-
-            print(f"     Placing order {sl_msg}...", end=" ")
-            order_params = {
-                "category": "linear", "symbol": symbol, "side": side,
-                "orderType": "Market", "qty": qty, "positionIdx": 0,
-                "orderLinkId": f"sfp_{symbol}_{int(time.time())}",
-            }
-            if sl_price is not None:
-                order_params["stopLoss"] = str(sl_price)
-            result = auth_request(base_url, "POST", "/v5/order/create",
-                                  api_key, api_secret, order_params)
-            ret = result.get("retCode", -1)
-            oid = result.get("result", {}).get("orderId", "N/A")
-
-            if ret == 0:
-                print(f"FILLED (orderId: {oid})")
-                log_sfp_trade(symbol, side, qty, price, est_value, args.leverage,
-                              grade, sfp_type, tf, "filled", oid, "live")
-                traded_symbols[symbol] = time.time()
-                trades_this_cycle += 1
-                current_exposure += est_value
-                state_key = f"{symbol}_{side}"
-                pos_state = load_sfp_state()
-                pos_state[state_key] = {
-                    "initial_sl_set": True, "current_tier_pct": 0, "highest_profit": 0,
-                }
-                save_sfp_state(pos_state)
-            elif ret == 10001 and "position idx" in result.get("retMsg", "").lower():
-                pos_idx = 1 if side == "Buy" else 2
-                order_params["positionIdx"] = pos_idx
-                order_params["orderLinkId"] = f"sfp_{symbol}_{int(time.time())}"
-                time.sleep(0.3)
-                r2 = auth_request(base_url, "POST", "/v5/order/create",
-                                  api_key, api_secret, order_params)
-                if r2.get("retCode") == 0:
-                    oid2 = r2.get("result", {}).get("orderId", "N/A")
-                    print(f"FILLED hedge (orderId: {oid2})")
-                    log_sfp_trade(symbol, side, qty, price, est_value, args.leverage,
-                                  grade, sfp_type, tf, "filled", oid2, "live")
-                    traded_symbols[symbol] = time.time()
-                    trades_this_cycle += 1
-                    state_key = f"{symbol}_{side}"
-                    pos_state = load_sfp_state()
-                    pos_state[state_key] = {
-                        "initial_sl_set": True, "current_tier_pct": 0, "highest_profit": 0,
-                    }
-                    save_sfp_state(pos_state)
-                else:
-                    print(f"     FAILED: {r2.get('retMsg')}")
-            else:
-                print(f"     FAILED: {result.get('retMsg')}")
-
-        print()
-
-    return traded_symbols
+            print(f"FAILED: {result.get('retMsg')}")
+        break
 
 
 def main():
@@ -1718,8 +1495,10 @@ def main():
     base_url = TESTNET_URL if args.testnet else MAINNET_URL
     env_label = "TESTNET" if args.testnet else "MAINNET"
 
+    if args.live:
+        args.trade = True
     trading_mode = args.trade
-    is_live = args.live and args.trade
+    is_live = args.live
     paper_mode = args.watch > 0 and not trading_mode
     if paper_mode:
         mode_str = "PAPER TRADING"
@@ -1731,29 +1510,33 @@ def main():
         mode_str = "SCAN ONLY"
 
     api_key = api_secret = None
-    pos_state = {}
-    traded_symbols = {}      # symbol -> last_trade_unix_ts
     consumed_levels = {}     # symbol -> set of consumed level keys
-    paper = None
 
+    # Unified tracker: PaperTrader for both paper and live/dry-run modes
+    paper = None
+    live_tracker = None
     if paper_mode:
         paper = PaperTrader(args.amount, args.leverage, args.min_grade,
                             args.account_balance, args.max_exposure_mult)
-
     if trading_mode:
-        api_key, api_secret = get_credentials()
-        init_sfp_logs()
-        pos_state = load_sfp_state()
+        live_tracker = PaperTrader(args.amount, args.leverage, args.min_grade,
+                                   args.account_balance, args.max_exposure_mult)
+    tracker = paper or live_tracker
 
-        if is_live and not args.testnet and not args.no_confirm:
-            print(f"\n  WARNING: LIVE SFP auto-trading on MAINNET.")
-            print(f"  ${args.amount} per trade | {args.leverage}x | Min grade: {args.min_grade}")
-            if args.no_stops:
-                print(f"  ZERO-HERO MODE: no initial SL, trailing stops only")
-            confirm = input("\n  Type CONFIRM to proceed: ").strip()
-            if confirm.upper() != "CONFIRM":
-                print("  Cancelled.")
-                sys.exit(0)
+    if is_live:
+        api_key, api_secret = get_credentials()
+    if trading_mode:
+        init_sfp_logs()
+
+    if is_live and not args.testnet and not args.no_confirm:
+        print(f"\n  WARNING: LIVE SFP auto-trading on MAINNET.")
+        print(f"  ${args.amount} per trade | {args.leverage}x | Min grade: {args.min_grade}")
+        if args.no_stops:
+            print(f"  ZERO-HERO MODE: no initial SL, trailing stops only")
+        confirm = input("\n  Type CONFIRM to proceed: ").strip()
+        if confirm.upper() != "CONFIRM":
+            print("  Cancelled.")
+            sys.exit(0)
 
     pivot_label = INTERVAL_LABELS.get(args.pivot_tf, args.pivot_tf)
     count_label = INTERVAL_LABELS.get(args.count_tf, args.count_tf)
@@ -1769,71 +1552,73 @@ def main():
         print(f"  Struct filter:   N={args.struct_count}")
     if args.msb_filter:
         print(f"  MSB + BB filter: ON (swing L{args.msb_swing_left}/R{args.msb_swing_right}, lookback {args.msb_lookback} bars)")
-    if paper_mode:
+    if tracker:
         max_exp = args.account_balance * args.max_exposure_mult
-        print(f"  Paper trade:     Grade-based sizing @ {args.leverage}x | Min grade: {args.min_grade}")
+        print(f"  Trading:         Grade-based sizing @ {args.leverage}x | Min grade: {args.min_grade}")
         print(f"  Capital:         ${args.account_balance:,.0f} | Max exposure: ${max_exp:,.0f} ({args.max_exposure_mult}x)")
         print(f"  Size per trade:  A+=${args.account_balance/5:,.0f} | A=${args.account_balance/7:,.0f} | B=${args.account_balance/10:,.0f}")
         print(f"  Stop loss:       Structural (beyond sweep + {SL_BUFFER_PCT}% buffer)")
         print(f"  Trailing tiers:  10%→8% | 30%→6% | 100%→3% | 300%→2%")
         print(f"  Re-entry after:  {RE_ENTRY_COOLDOWN_HOURS}h cooldown")
         print(f"  P&L summary shown after each scan. Ctrl+C for final summary")
-    elif trading_mode:
-        print(f"  Trade amount:    ${args.amount} @ {args.leverage}x")
-        print(f"  Min grade:       {args.min_grade}")
-        if args.no_stops:
-            print(f"  Initial SL:      NONE — zero-hero (trailing stops only)")
-        else:
-            print(f"  Initial SL:      {args.initial_sl}%")
-        print(f"  Re-entry after:  {RE_ENTRY_COOLDOWN_HOURS}h cooldown")
-        print(f"  Trailing tiers:  10%→8% | 30%→6% | 100%→3% | 300%→2%")
+
+    def _publish_positions(trk, tickers):
+        """Publish tracker positions to dashboard."""
+        price_map = {t["symbol"]: float(t["lastPrice"]) for t in tickers
+                     if "lastPrice" in t}
+        shared_state.write_positions("sfp", [
+            {"symbol": sym, "side": p["side"], "entry_price": p["entry_price"],
+             "current_price": price_map.get(sym, p["entry_price"]),
+             "pnl_pct": round(((price_map.get(sym, p["entry_price"]) - p["entry_price"]) / p["entry_price"] * 100)
+                              if p["side"] == "long" else
+                              ((p["entry_price"] - price_map.get(sym, p["entry_price"])) / p["entry_price"] * 100), 2),
+             "size_usdt": p.get("qty", trk.amount / p["entry_price"]) * p["entry_price"],
+             "leverage": trk.leverage,
+             "entry_time": p.get("entry_unix", 0),
+             "grade": p.get("grade", "")}
+            for sym, p in trk.positions.items()
+        ])
 
     while True:
         results = run_sfp_scan(base_url, args, consumed_levels)
         display_results(results, env_label, args)
 
-        # Paper trading: enter signals and update positions
-        if paper and results:
-            paper.enter_signals(results)
+        # Entry — unified through tracker
+        if tracker and results:
+            entries = tracker.enter_signals(results)
+            # For live: place actual orders on exchange
+            if is_live:
+                for entry in entries:
+                    ok = _place_sfp_order(base_url, api_key, api_secret, entry, args.leverage)
+                    if not ok:
+                        tracker.positions.pop(entry["symbol"], None)
+            elif trading_mode:
+                for entry in entries:
+                    side_str = "Buy" if entry["side"] == "long" else "Sell"
+                    log_sfp_trade(entry["symbol"], side_str, str(entry["qty"]),
+                                  entry["entry_price"], entry["notional"], args.leverage,
+                                  entry["grade"], entry["sfp_type"], entry["tf"],
+                                  "dry-run", "N/A", "dry-run")
 
-        if paper:
+        # Exit checks — unified through tracker
+        if tracker:
             tickers = fetch_linear_tickers(base_url)
-            paper.update_prices(tickers)
-            paper.display_open_positions(tickers)
-            paper.display_periodic_summary(tickers)
-            # Publish positions to dashboard
-            price_map = {t["symbol"]: float(t["lastPrice"]) for t in tickers
-                         if "lastPrice" in t}
-            shared_state.write_positions("sfp", [
-                {"symbol": sym, "side": p["side"], "entry_price": p["entry_price"],
-                 "current_price": price_map.get(sym, p["entry_price"]),
-                 "pnl_pct": round(((price_map.get(sym, p["entry_price"]) - p["entry_price"]) / p["entry_price"] * 100)
-                                  if p["side"] == "long" else
-                                  ((p["entry_price"] - price_map.get(sym, p["entry_price"])) / p["entry_price"] * 100), 2),
-                 "size_usdt": paper.amount,
-                 "leverage": paper.leverage,
-                 "entry_time": p.get("entry_unix", 0),
-                 "grade": p.get("grade", "")}
-                for sym, p in paper.positions.items()
-            ])
-
-        # Auto-trade SFP signals
-        if trading_mode and results:
-            traded_symbols = execute_sfp_trades(
-                results, base_url, api_key, api_secret, args, traded_symbols)
-
-        # Manage existing positions
-        if trading_mode:
-            pos_state = manage_sfp_positions(
-                base_url, api_key, api_secret, args.initial_sl, is_live, pos_state)
+            closed = tracker.update_prices(tickers)
+            # For live: close positions on exchange
+            if is_live:
+                for c in closed:
+                    _close_sfp_position(base_url, api_key, api_secret, c)
+            tracker.display_open_positions(tickers)
+            tracker.display_periodic_summary(tickers)
+            _publish_positions(tracker, tickers)
 
         if args.save:
             ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             save_results(results, f"sfp_scan_{ts}.json")
 
         if args.watch <= 0:
-            if paper:
-                paper.display_summary()
+            if tracker:
+                tracker.display_summary()
             break
 
         print(f"\n  Next scan in {args.watch} min... (Ctrl+C to stop)\n")
@@ -1844,27 +1629,17 @@ def main():
             while waited < total_wait:
                 time.sleep(min(price_check_interval, total_wait - waited))
                 waited += price_check_interval
-                if waited < total_wait and paper and paper.positions:
+                if waited < total_wait and tracker and tracker.positions:
                     print(f"  [Price check — {(total_wait - waited)//60}m until next scan]")
                     tickers = fetch_linear_tickers(base_url)
-                    paper.update_prices(tickers)
-                    price_map = {t["symbol"]: float(t["lastPrice"]) for t in tickers
-                                 if "lastPrice" in t}
-                    shared_state.write_positions("sfp", [
-                        {"symbol": sym, "side": p["side"], "entry_price": p["entry_price"],
-                         "current_price": price_map.get(sym, p["entry_price"]),
-                         "pnl_pct": round(((price_map.get(sym, p["entry_price"]) - p["entry_price"]) / p["entry_price"] * 100)
-                                          if p["side"] == "long" else
-                                          ((p["entry_price"] - price_map.get(sym, p["entry_price"])) / p["entry_price"] * 100), 2),
-                         "size_usdt": p.get("qty", paper.amount / p["entry_price"]) * p["entry_price"],
-                         "leverage": paper.leverage,
-                         "entry_time": p.get("entry_unix", 0),
-                         "grade": p.get("grade", "")}
-                        for sym, p in paper.positions.items()
-                    ])
+                    closed = tracker.update_prices(tickers)
+                    if is_live:
+                        for c in closed:
+                            _close_sfp_position(base_url, api_key, api_secret, c)
+                    _publish_positions(tracker, tickers)
         except KeyboardInterrupt:
-            if paper:
-                paper.display_summary()
+            if tracker:
+                tracker.display_summary()
             print("\n  Scanner stopped.")
             break
 
