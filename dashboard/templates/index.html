@@ -318,14 +318,18 @@
                 <h2 style="margin:0; font-size:0.85em">Accumulation Bot</h2>
                 <span style="font-size:0.68em; color:#9ca3af" id="stat-runtime">—</span>
             </div>
-            <div class="stats-bar" style="margin-bottom:0; justify-content:flex-start; gap:10px">
+            <div class="stats-bar" style="margin-bottom:0; justify-content:flex-start; gap:10px; flex-wrap:wrap">
                 <div class="stat-card" style="padding:10px 16px; min-width:auto">
-                    <div class="stat-value" style="font-size:1.1em" id="acc-pnl-realized">—</div>
-                    <div class="stat-label">Realized P&L</div>
+                    <div class="stat-value" style="font-size:1.1em" id="acc-pnl-paper">—</div>
+                    <div class="stat-label">Paper P&L</div>
+                </div>
+                <div class="stat-card" style="padding:10px 16px; min-width:auto">
+                    <div class="stat-value" style="font-size:1.1em" id="acc-pnl-live">—</div>
+                    <div class="stat-label">Live P&L</div>
                 </div>
                 <div class="stat-card" style="padding:10px 16px; min-width:auto">
                     <div class="stat-value" style="font-size:1.1em" id="acc-pnl-unrealized">—</div>
-                    <div class="stat-label">Unrealized P&L</div>
+                    <div class="stat-label">Unrealized</div>
                 </div>
                 <div class="stat-card" style="padding:10px 16px; min-width:auto">
                     <div class="stat-value" style="font-size:1.1em" id="acc-winrate">—</div>
@@ -346,14 +350,18 @@
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px">
                 <h2 style="margin:0; font-size:0.85em">SFP Scanner</h2>
             </div>
-            <div class="stats-bar" style="margin-bottom:0; justify-content:flex-start; gap:10px">
+            <div class="stats-bar" style="margin-bottom:0; justify-content:flex-start; gap:10px; flex-wrap:wrap">
                 <div class="stat-card" style="padding:10px 16px; min-width:auto">
-                    <div class="stat-value" style="font-size:1.1em" id="sfp-pnl-realized">—</div>
-                    <div class="stat-label">Realized P&L</div>
+                    <div class="stat-value" style="font-size:1.1em" id="sfp-pnl-paper">—</div>
+                    <div class="stat-label">Paper P&L</div>
+                </div>
+                <div class="stat-card" style="padding:10px 16px; min-width:auto">
+                    <div class="stat-value" style="font-size:1.1em" id="sfp-pnl-live">—</div>
+                    <div class="stat-label">Live P&L</div>
                 </div>
                 <div class="stat-card" style="padding:10px 16px; min-width:auto">
                     <div class="stat-value" style="font-size:1.1em" id="sfp-pnl-unrealized">—</div>
-                    <div class="stat-label">Unrealized P&L</div>
+                    <div class="stat-label">Unrealized</div>
                 </div>
                 <div class="stat-card" style="padding:10px 16px; min-width:auto">
                     <div class="stat-value" style="font-size:1.1em" id="sfp-winrate">—</div>
@@ -642,16 +650,22 @@
                 fetch('/api/positions').then(r => r.json()),
                 fetch('/api/stats').then(r => r.json()),
             ]).then(([posData, stats]) => {
-                // Per-bot stats
+                // Per-bot stats (paper / live split)
                 const accStats = stats.accumulation || {};
+                const accPaper = accStats.paper || {};
+                const accLive = accStats.live || {};
                 const sfpStats = stats.sfp || {};
+                const sfpPaper = sfpStats.paper || {};
+                const sfpLive = sfpStats.live || {};
 
-                document.getElementById('acc-pnl-realized').innerHTML = fmtPnl(accStats.total_pnl_usd || 0, '');
+                document.getElementById('acc-pnl-paper').innerHTML = fmtPnl(accPaper.total_pnl_usd || 0, '');
+                document.getElementById('acc-pnl-live').innerHTML = fmtPnl(accLive.total_pnl_usd || 0, '');
                 document.getElementById('acc-winrate').textContent =
                     accStats.total_trades > 0 ? accStats.win_rate.toFixed(1) + '%' : '—';
                 document.getElementById('acc-trades').textContent = accStats.total_trades || 0;
 
-                document.getElementById('sfp-pnl-realized').innerHTML = fmtPnl(sfpStats.total_pnl_usd || 0, '');
+                document.getElementById('sfp-pnl-paper').innerHTML = fmtPnl(sfpPaper.total_pnl_usd || 0, '');
+                document.getElementById('sfp-pnl-live').innerHTML = fmtPnl(sfpLive.total_pnl_usd || 0, '');
                 document.getElementById('sfp-winrate').textContent =
                     sfpStats.total_trades > 0 ? sfpStats.win_rate.toFixed(1) + '%' : '—';
                 document.getElementById('sfp-trades').textContent = sfpStats.total_trades || 0;

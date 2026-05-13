@@ -234,5 +234,9 @@ def get_stats() -> dict:
 
     result = _calc(trades)
     result["accumulation"] = _calc(acc_trades)
+    result["accumulation"]["paper"] = _calc([t for t in acc_trades if not t.get("live")])
+    result["accumulation"]["live"] = _calc([t for t in acc_trades if t.get("live")])
     result["sfp"] = _calc(sfp_trades)
+    result["sfp"]["paper"] = _calc([t for t in sfp_trades if not t.get("live")])
+    result["sfp"]["live"] = _calc([t for t in sfp_trades if t.get("live")])
     return result
