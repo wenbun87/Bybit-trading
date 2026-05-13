@@ -310,23 +310,75 @@
         </div>
     </div>
 
-    <!-- Stats bar -->
-    <div class="stats-bar" id="stats-bar">
-        <div class="stat-card">
-            <div class="stat-value" id="stat-runtime">—</div>
-            <div class="stat-label">Runtime</div>
+    <!-- Per-bot P&L trackers -->
+    <div style="display:flex; gap:16px; margin-bottom:22px; flex-wrap:wrap; max-width:1600px; margin-left:auto; margin-right:auto">
+        <!-- Accumulation Bot Stats -->
+        <div class="panel" style="flex:1; min-width:300px; margin-bottom:0; padding:16px 20px">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px">
+                <h2 style="margin:0; font-size:0.85em">Accumulation Bot</h2>
+                <span style="font-size:0.68em; color:#9ca3af" id="stat-runtime">—</span>
+            </div>
+            <div class="stats-bar" style="margin-bottom:0; justify-content:flex-start; gap:10px">
+                <div class="stat-card" style="padding:10px 16px; min-width:auto">
+                    <div class="stat-value" style="font-size:1.1em" id="acc-pnl-realized">—</div>
+                    <div class="stat-label">Realized P&L</div>
+                </div>
+                <div class="stat-card" style="padding:10px 16px; min-width:auto">
+                    <div class="stat-value" style="font-size:1.1em" id="acc-pnl-unrealized">—</div>
+                    <div class="stat-label">Unrealized P&L</div>
+                </div>
+                <div class="stat-card" style="padding:10px 16px; min-width:auto">
+                    <div class="stat-value" style="font-size:1.1em" id="acc-winrate">—</div>
+                    <div class="stat-label">Win Rate</div>
+                </div>
+                <div class="stat-card" style="padding:10px 16px; min-width:auto">
+                    <div class="stat-value" style="font-size:1.1em" id="acc-trades">—</div>
+                    <div class="stat-label">Trades</div>
+                </div>
+                <div class="stat-card" style="padding:10px 16px; min-width:auto">
+                    <div class="stat-value" style="font-size:1.1em" id="acc-open">—</div>
+                    <div class="stat-label">Open</div>
+                </div>
+            </div>
         </div>
+        <!-- SFP Bot Stats -->
+        <div class="panel" style="flex:1; min-width:300px; margin-bottom:0; padding:16px 20px">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px">
+                <h2 style="margin:0; font-size:0.85em">SFP Scanner</h2>
+            </div>
+            <div class="stats-bar" style="margin-bottom:0; justify-content:flex-start; gap:10px">
+                <div class="stat-card" style="padding:10px 16px; min-width:auto">
+                    <div class="stat-value" style="font-size:1.1em" id="sfp-pnl-realized">—</div>
+                    <div class="stat-label">Realized P&L</div>
+                </div>
+                <div class="stat-card" style="padding:10px 16px; min-width:auto">
+                    <div class="stat-value" style="font-size:1.1em" id="sfp-pnl-unrealized">—</div>
+                    <div class="stat-label">Unrealized P&L</div>
+                </div>
+                <div class="stat-card" style="padding:10px 16px; min-width:auto">
+                    <div class="stat-value" style="font-size:1.1em" id="sfp-winrate">—</div>
+                    <div class="stat-label">Win Rate</div>
+                </div>
+                <div class="stat-card" style="padding:10px 16px; min-width:auto">
+                    <div class="stat-value" style="font-size:1.1em" id="sfp-trades">—</div>
+                    <div class="stat-label">Trades</div>
+                </div>
+                <div class="stat-card" style="padding:10px 16px; min-width:auto">
+                    <div class="stat-value" style="font-size:1.1em" id="sfp-open">—</div>
+                    <div class="stat-label">Open</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- Combined totals -->
+    <div class="stats-bar" id="stats-bar" style="margin-bottom:22px">
         <div class="stat-card">
             <div class="stat-value" id="stat-pnl">—</div>
-            <div class="stat-label">Total P&L ($)</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-value" id="stat-pnl-pct">—</div>
-            <div class="stat-label">Total P&L (%)</div>
+            <div class="stat-label">Combined P&L ($)</div>
         </div>
         <div class="stat-card">
             <div class="stat-value" id="stat-winrate">—</div>
-            <div class="stat-label">Win Rate</div>
+            <div class="stat-label">Combined Win Rate</div>
         </div>
         <div class="stat-card">
             <div class="stat-value" id="stat-open">—</div>
@@ -590,32 +642,52 @@
                 fetch('/api/positions').then(r => r.json()),
                 fetch('/api/stats').then(r => r.json()),
             ]).then(([posData, stats]) => {
-                // Update stats bar
-                const pnl = stats.total_pnl_usd || 0;
-                document.getElementById('stat-pnl').innerHTML = fmtPnl(pnl, '');
-                const balEl = document.getElementById('balance-auto_trader');
-                const acctBal = balEl ? parseFloat(balEl.value) : 500;
-                const totalPnlPct = acctBal > 0 ? (pnl / acctBal) * 100 : 0;
-                document.getElementById('stat-pnl-pct').innerHTML = fmtPnl(totalPnlPct, '%');
+                // Per-bot stats
+                const accStats = stats.accumulation || {};
+                const sfpStats = stats.sfp || {};
+
+                document.getElementById('acc-pnl-realized').innerHTML = fmtPnl(accStats.total_pnl_usd || 0, '');
+                document.getElementById('acc-winrate').textContent =
+                    accStats.total_trades > 0 ? accStats.win_rate.toFixed(1) + '%' : '—';
+                document.getElementById('acc-trades').textContent = accStats.total_trades || 0;
+
+                document.getElementById('sfp-pnl-realized').innerHTML = fmtPnl(sfpStats.total_pnl_usd || 0, '');
+                document.getElementById('sfp-winrate').textContent =
+                    sfpStats.total_trades > 0 ? sfpStats.win_rate.toFixed(1) + '%' : '—';
+                document.getElementById('sfp-trades').textContent = sfpStats.total_trades || 0;
+
+                // Combined stats
+                const totalPnl = (accStats.total_pnl_usd || 0) + (sfpStats.total_pnl_usd || 0);
+                document.getElementById('stat-pnl').innerHTML = fmtPnl(totalPnl, '');
                 document.getElementById('stat-winrate').textContent =
                     stats.win_rate !== undefined ? stats.win_rate.toFixed(1) + '%' : '—';
                 document.getElementById('stat-total').textContent =
                     stats.total_trades !== undefined ? stats.total_trades : '—';
 
-                // Build positions rows
+                // Build positions rows + unrealized P&L per bot
                 let openCount = 0;
+                let accOpen = 0, sfpOpen = 0;
+                let accUnrealized = 0, sfpUnrealized = 0;
                 const rows = [];
                 const now = Date.now() / 1000;
 
                 for (const [botName, botData] of Object.entries(posData)) {
                     const positions = botData.positions || [];
                     openCount += positions.length;
+                    const isAcc = botName === 'accumulation' || botName === 'auto_trader';
+                    const isSfp = botName === 'sfp' || botName === 'sfp_scanner';
+                    if (isAcc) accOpen += positions.length;
+                    if (isSfp) sfpOpen += positions.length;
                     for (const p of positions) {
                         const pnlPct = p.pnl_pct !== undefined ? p.pnl_pct : null;
                         const sizeUsdt = p.size_usdt !== undefined ? p.size_usdt : null;
                         const lev = p.leverage || 1;
                         const pnlUsd = sizeUsdt !== null && pnlPct !== null
                             ? pnlPct / 100 * sizeUsdt : null;
+                        if (pnlUsd !== null) {
+                            if (isAcc) accUnrealized += pnlUsd;
+                            if (isSfp) sfpUnrealized += pnlUsd;
+                        }
                         const heldSec = p.entry_time ? now - p.entry_time : null;
                         const adds = p.pyramid_adds || 0;
                         const sizeLabel = sizeUsdt !== null
@@ -636,6 +708,16 @@
                         </tr>`);
                     }
                 }
+
+                // Per-bot unrealized + open counts
+                document.getElementById('acc-pnl-unrealized').innerHTML = fmtPnl(accUnrealized, '');
+                document.getElementById('acc-open').textContent = accOpen;
+                document.getElementById('sfp-pnl-unrealized').innerHTML = fmtPnl(sfpUnrealized, '');
+                document.getElementById('sfp-open').textContent = sfpOpen;
+
+                // Combined P&L includes unrealized
+                const combinedPnl = totalPnl + accUnrealized + sfpUnrealized;
+                document.getElementById('stat-pnl').innerHTML = fmtPnl(combinedPnl, '');
 
                 document.getElementById('stat-open').textContent = openCount;
                 const tbody = document.getElementById('positions-tbody');

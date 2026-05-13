@@ -195,29 +195,35 @@ def read_trade_history(limit: int = 100) -> list[dict]:
         return []
 
 def get_stats() -> dict:
-    """Compute aggregate stats from trade history."""
+    """Compute aggregate and per-bot stats from trade history."""
     trades = read_trade_history(limit=0)
-    if not trades:
-        return {"total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0,
-                "total_pnl_usd": 0, "total_pnl_pct": 0, "avg_hold_hours": 0}
 
-    wins = sum(1 for t in trades if t.get("pnl_pct", 0) > 0)
-    losses = sum(1 for t in trades if t.get("pnl_pct", 0) <= 0)
-    total_pnl_usd = sum(t.get("pnl_usd", 0) for t in trades)
-    total_pnl_pct = sum(t.get("pnl_pct", 0) for t in trades)
+    def _calc(trade_list):
+        if not trade_list:
+            return {"total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0,
+                    "total_pnl_usd": 0, "avg_pnl_pct": 0, "avg_hold_hours": 0}
+        wins = sum(1 for t in trade_list if t.get("pnl_pct", 0) > 0)
+        total_pnl_usd = sum(t.get("pnl_usd", 0) for t in trade_list)
+        total_pnl_pct = sum(t.get("pnl_pct", 0) for t in trade_list)
+        hold_times = []
+        for t in trade_list:
+            if t.get("entry_time") and t.get("closed_at"):
+                hold_times.append((t["closed_at"] - t["entry_time"]) / 3600)
+        avg_hold = sum(hold_times) / len(hold_times) if hold_times else 0
+        return {
+            "total_trades": len(trade_list),
+            "wins": wins,
+            "losses": len(trade_list) - wins,
+            "win_rate": wins / len(trade_list) * 100,
+            "total_pnl_usd": round(total_pnl_usd, 2),
+            "avg_pnl_pct": round(total_pnl_pct / len(trade_list), 2),
+            "avg_hold_hours": round(avg_hold, 1),
+        }
 
-    hold_times = []
-    for t in trades:
-        if t.get("entry_time") and t.get("closed_at"):
-            hold_times.append((t["closed_at"] - t["entry_time"]) / 3600)
-    avg_hold = sum(hold_times) / len(hold_times) if hold_times else 0
+    acc_trades = [t for t in trades if t.get("bot") in ("accumulation", "auto_trader")]
+    sfp_trades = [t for t in trades if t.get("bot") in ("sfp", "sfp_scanner")]
 
-    return {
-        "total_trades": len(trades),
-        "wins": wins,
-        "losses": losses,
-        "win_rate": wins / len(trades) * 100 if trades else 0,
-        "total_pnl_usd": round(total_pnl_usd, 2),
-        "avg_pnl_pct": round(total_pnl_pct / len(trades), 2) if trades else 0,
-        "avg_hold_hours": round(avg_hold, 1),
-    }
+    result = _calc(trades)
+    result["accumulation"] = _calc(acc_trades)
+    result["sfp"] = _calc(sfp_trades)
+    return result
