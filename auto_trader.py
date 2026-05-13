@@ -98,7 +98,7 @@ SCORE_SIZE_TIERS = [
 def compute_trade_size(score: float, account_balance: float, max_exposure: float,
                        current_exposure: float, leverage: int) -> float:
     """Compute trade size (margin) based on signal score and account limits."""
-    base = account_balance / 10
+    base = account_balance / 5
     multiplier = 0.5
     for min_score, mult in SCORE_SIZE_TIERS:
         if score >= min_score:
@@ -1069,6 +1069,21 @@ def run_auto_trader(args):
             ])
         elif args.live:
             display_live_pnl(base_url, api_key, api_secret)
+            live_positions = get_open_positions(base_url, api_key, api_secret)
+            shared_state.write_positions("accumulation", [
+                {"symbol": p.get("symbol", ""), "side": "long" if p.get("side") == "Buy" else "short",
+                 "entry_price": float(p.get("avgPrice", "0") or "0"),
+                 "current_price": float(p.get("markPrice", "0") or "0"),
+                 "pnl_pct": round(((float(p.get("markPrice", "0") or "0") - float(p.get("avgPrice", "0") or "0"))
+                                   / float(p.get("avgPrice", "1") or "1") * 100)
+                                  if p.get("side") == "Buy" else
+                                  ((float(p.get("avgPrice", "0") or "0") - float(p.get("markPrice", "0") or "0"))
+                                   / float(p.get("avgPrice", "1") or "1") * 100), 2),
+                 "size_usdt": float(p.get("positionValue", "0") or "0"),
+                 "leverage": int(p.get("leverage", "1") or "1"),
+                 "entry_time": 0}
+                for p in live_positions if float(p.get("size", "0") or "0") > 0
+            ])
 
         # Session summary
         print(f"\n  Session: {session.trades_today} trades today | "
@@ -1084,6 +1099,23 @@ def run_auto_trader(args):
             while waited < total_wait:
                 time.sleep(min(exit_check_interval, total_wait - waited))
                 waited += exit_check_interval
+                if waited < total_wait and args.live:
+                    live_pos = get_open_positions(base_url, api_key, api_secret)
+                    if live_pos:
+                        shared_state.write_positions("accumulation", [
+                            {"symbol": p.get("symbol", ""), "side": "long" if p.get("side") == "Buy" else "short",
+                             "entry_price": float(p.get("avgPrice", "0") or "0"),
+                             "current_price": float(p.get("markPrice", "0") or "0"),
+                             "pnl_pct": round(((float(p.get("markPrice", "0") or "0") - float(p.get("avgPrice", "0") or "0"))
+                                               / float(p.get("avgPrice", "1") or "1") * 100)
+                                              if p.get("side") == "Buy" else
+                                              ((float(p.get("avgPrice", "0") or "0") - float(p.get("markPrice", "0") or "0"))
+                                               / float(p.get("avgPrice", "1") or "1") * 100), 2),
+                             "size_usdt": float(p.get("positionValue", "0") or "0"),
+                             "leverage": int(p.get("leverage", "1") or "1"),
+                             "entry_time": 0}
+                            for p in live_pos if float(p.get("size", "0") or "0") > 0
+                        ])
                 if waited < total_wait and paper and paper.positions:
                     print(f"\n  [Price check — {(total_wait - waited)//60}m until next scan]")
                     tickers = fetch_all_linear_tickers(base_url)
