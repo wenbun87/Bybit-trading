@@ -97,15 +97,15 @@ SCORE_SIZE_TIERS = [
 
 def compute_trade_size(score: float, account_balance: float, max_exposure: float,
                        current_exposure: float, leverage: int) -> float:
-    """Compute trade size (margin) based on signal score and account limits."""
-    base = account_balance / 5
+    """Compute trade size (notional) based on signal score and account limits."""
+    base_margin = account_balance / 5
     multiplier = 0.5
     for min_score, mult in SCORE_SIZE_TIERS:
         if score >= min_score:
             multiplier = mult
             break
-    size = base * multiplier
-    remaining = max(0, (max_exposure - current_exposure) / leverage)
+    size = base_margin * multiplier * leverage
+    remaining = max(0, max_exposure - current_exposure)
     size = min(size, remaining)
     size = max(size, 0)
     return round(size, 2)
@@ -592,7 +592,7 @@ class MomentumPaperTrader:
                 price = pos.get("current_price", pos["entry_price"])
                 entry = pos["entry_price"]
                 pnl_pct = (price - entry) / entry * 100
-                pnl_usd = pnl_pct / 100 * pos.get("trade_size", self.amount)
+                pnl_usd = pnl_pct / 100 * self._total_size(pos)
                 total_pnl += pnl_usd
                 if pnl_usd >= 0:
                     wins += 1
@@ -786,12 +786,12 @@ def run_auto_trader(args):
             session.traded_symbols.update(saved_traded_symbols)
         tracker._traded_symbols_ref = session.traded_symbols
 
-    base_size = args.account_balance / 5
+    base_size = args.account_balance / 5 * args.leverage
     print(f"\n{'='*70}")
     print(f"  ACCUMULATION AUTO-TRADER [{env_label}] [{mode}]")
     print(f"{'='*70}")
     print(f"  Account balance: ${args.account_balance:,.0f}")
-    print(f"  Sizing:          Score-based (${base_size*0.5:.0f}-${base_size*2:.0f} per trade)")
+    print(f"  Sizing:          Score-based (${base_size*0.5:.0f}-${base_size*3:.0f} notional per trade)")
     print(f"  Leverage:        {args.leverage}x")
     print(f"  Max exposure:    ${max_exposure:,.0f} notional ({args.max_exposure_mult}x account)")
     print(f"  Strategy:        Pool D accumulation → exit on graduation")
@@ -1027,7 +1027,7 @@ def run_auto_trader(args):
                                   score, signals, "dry-run", "N/A", "dry-run")
                         if paper:
                             paper.enter(symbol, price, score, signals, trade_size=trade_size)
-                        session.record_trade(symbol, est_value * args.leverage)
+                        session.record_trade(symbol, est_value)
                         trades_this_cycle += 1
                     else:
                         print(f"     Setting leverage to {args.leverage}x...", end=" ")
@@ -1047,7 +1047,7 @@ def run_auto_trader(args):
                                       score, signals, "filled", order_id, "live")
                             if live_tracker:
                                 live_tracker.enter(symbol, price, score, signals, trade_size=trade_size)
-                            session.record_trade(symbol, est_value * args.leverage)
+                            session.record_trade(symbol, est_value)
                             trades_this_cycle += 1
                         elif ret_code == 10001 and "position idx" in result.get("retMsg", "").lower():
                             print(f"hedge mode detected, retrying...", end=" ")
@@ -1068,7 +1068,7 @@ def run_auto_trader(args):
                                           score, signals, "filled", oid, "live")
                                 if live_tracker:
                                     live_tracker.enter(symbol, price, score, signals, trade_size=trade_size)
-                                session.record_trade(symbol, est_value * args.leverage)
+                                session.record_trade(symbol, est_value)
                                 trades_this_cycle += 1
                             else:
                                 print(f"FAILED: {result2.get('retMsg')}")
@@ -1222,8 +1222,8 @@ def main():
     if args.live and not args.testnet and not args.no_confirm:
         print(f"\n  WARNING: You are about to run LIVE auto-trading on MAINNET.")
         print(f"  This will place REAL orders with REAL money.")
-        base = args.account_balance / 5
-        print(f"  Account: ${args.account_balance:,.0f} | Size: ${base*0.75:.0f}-${base*3:.0f} per trade | Leverage: {args.leverage}x")
+        base = args.account_balance / 5 * args.leverage
+        print(f"  Account: ${args.account_balance:,.0f} | Size: ${base*0.75:.0f}-${base*3:.0f} notional per trade | Leverage: {args.leverage}x")
         print(f"  Max exposure: ${args.account_balance * args.max_exposure_mult:,.0f} ({args.max_exposure_mult}x account)")
         confirm = input("\n  Type CONFIRM to proceed: ").strip()
         if confirm.upper() != "CONFIRM":
