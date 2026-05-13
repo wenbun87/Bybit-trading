@@ -66,7 +66,7 @@ RECV_WINDOW = "5000"
 # Safety defaults
 DEFAULT_AMOUNT_USDT = 250       # $ per trade (fixed mode, overridden by score-based)
 DEFAULT_ACCOUNT_BALANCE = 500   # Account balance for score-based sizing
-DEFAULT_MAX_EXPOSURE_MULT = 5   # Max total exposure = balance × this (with leverage)
+DEFAULT_MAX_EXPOSURE_MULT = 10  # Max total exposure = balance × this (with leverage)
 DEFAULT_MIN_SCORE = 40          # ELEVATED threshold (catch accumulation earlier)
 DEFAULT_INTERVAL_MIN = 5        # scan every 5 minutes
 MAX_TRADES_PER_CYCLE = 2        # max trades per scan cycle
@@ -1222,8 +1222,8 @@ def main():
     if args.live and not args.testnet and not args.no_confirm:
         print(f"\n  WARNING: You are about to run LIVE auto-trading on MAINNET.")
         print(f"  This will place REAL orders with REAL money.")
-        base = args.account_balance / 10
-        print(f"  Account: ${args.account_balance:,.0f} | Size: ${base*0.5:.0f}-${base*2:.0f} per trade | Leverage: {args.leverage}x")
+        base = args.account_balance / 5
+        print(f"  Account: ${args.account_balance:,.0f} | Size: ${base*0.75:.0f}-${base*3:.0f} per trade | Leverage: {args.leverage}x")
         print(f"  Max exposure: ${args.account_balance * args.max_exposure_mult:,.0f} ({args.max_exposure_mult}x account)")
         confirm = input("\n  Type CONFIRM to proceed: ").strip()
         if confirm.upper() != "CONFIRM":
