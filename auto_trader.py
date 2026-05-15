@@ -786,6 +786,17 @@ def run_auto_trader(args):
         if saved_traded_symbols:
             session.traded_symbols.update(saved_traded_symbols)
         tracker._traded_symbols_ref = session.traded_symbols
+        # Restore exposure and daily trade count so limits work across restarts
+        for pos in tracker.positions.values():
+            session.total_exposure += pos.get("trade_size", 0)
+        today = datetime.now(timezone.utc).date()
+        for ts in session.traded_symbols.values():
+            if datetime.fromtimestamp(ts, tz=timezone.utc).date() == today:
+                session.trades_today += 1
+        if tracker.positions or session.trades_today:
+            print(f"  [State] Restored {len(tracker.positions)} position(s), "
+                  f"${session.total_exposure:,.0f} exposure, "
+                  f"{session.trades_today} trades today")
 
     base_size = args.account_balance / 5 * args.leverage
     print(f"\n{'='*70}")
