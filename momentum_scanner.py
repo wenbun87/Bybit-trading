@@ -1256,38 +1256,40 @@ def check_exit_signals(base_url: str, symbol: str, entry_price: float,
         except (ValueError, TypeError):
             pass
 
-    # Minimum profit before considering signal-based exits (hard stop & crime pump bypass this)
+    # Profit thresholds for signal-based exits (hard stop & crime pump bypass these)
+    # Below MIN_PROFIT_HOLD: exits allowed (cut losers)
+    # MIN_PROFIT_HOLD to MIN_PROFIT_EXIT: exits blocked (let winners run)
+    # Above MIN_PROFIT_EXIT: exits allowed (take profit)
+    MIN_PROFIT_HOLD = 10
     MIN_PROFIT_EXIT = 30
+    profit_ok = pnl_pct < MIN_PROFIT_HOLD or pnl_pct >= MIN_PROFIT_EXIT
 
-    # Exit signal 1: graduated + stale (24h+ in Pool A/B) + up 30%+
-    # Day 1-2 on leaderboard = FOMO buying = let it ride
-    # 24h+ = momentum exhaustion approaching
+    # Exit signal 1: graduated + stale (24h+ in Pool A/B)
     if is_graduated and graduated_since:
         hours_graduated = (time.time() - graduated_since) / 3600
-        if hours_graduated >= 24 and pnl_pct >= MIN_PROFIT_EXIT:
-            exit_signals.append(f"Pool {current_pool} for {hours_graduated:.0f}h + up {pnl_pct:+.0f}% — momentum stale")
+        if hours_graduated >= 24 and profit_ok:
+            exit_signals.append(f"Pool {current_pool} for {hours_graduated:.0f}h + {pnl_pct:+.0f}% — momentum stale")
         elif hours_graduated >= 24:
             exit_signals.append(f"Pool {current_pool} for {hours_graduated:.0f}h — riding but underwater")
         else:
             exit_signals.append(f"Pool {current_pool} for {hours_graduated:.1f}h — riding FOMO wave")
 
-    # Exit signal 2: graduated + weakness signals + up 30%+
-    # Graduation alone is NOT enough — need actual signs of distribution
-    if is_graduated and (funding_positive or oi_dropping) and pnl_pct >= MIN_PROFIT_EXIT:
+    # Exit signal 2: graduated + weakness signals
+    if is_graduated and (funding_positive or oi_dropping) and profit_ok:
         reasons = []
         if funding_positive:
             reasons.append("funding positive")
         if oi_dropping:
             reasons.append("OI dropping")
-        exit_signals.append(f"Pool {current_pool} + {' + '.join(reasons)} + up {pnl_pct:+.0f}% — distribution starting")
+        exit_signals.append(f"Pool {current_pool} + {' + '.join(reasons)} + {pnl_pct:+.0f}% — distribution starting")
 
     # Exit signal 3: funding flipped positive (even without graduation)
-    if funding_positive and pnl_pct >= MIN_PROFIT_EXIT:
-        exit_signals.append(f"funding positive (avg {avg_funding:+.4f}%) while up {pnl_pct:+.0f}% — squeeze over")
+    if funding_positive and profit_ok:
+        exit_signals.append(f"funding positive (avg {avg_funding:+.4f}%) at {pnl_pct:+.0f}% — squeeze over")
 
-    # Exit signal 4: OI dropping while up 30%+
-    if oi_dropping and pnl_pct >= MIN_PROFIT_EXIT:
-        exit_signals.append(f"OI dropping {oi_change:+.1f}% while up {pnl_pct:+.0f}% — distribution")
+    # Exit signal 4: OI dropping
+    if oi_dropping and profit_ok:
+        exit_signals.append(f"OI dropping {oi_change:+.1f}% at {pnl_pct:+.0f}% — distribution")
 
     # Exit signal 5: extreme extension from entry
     if pnl_pct >= 200:

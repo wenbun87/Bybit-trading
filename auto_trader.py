@@ -943,7 +943,7 @@ def run_auto_trader(args):
             # FHE backtest: 25 catches it May 1 (day before pump, +134%).
             # Lower thresholds catch earlier but lock capital on dead days.
             # Scam coins pump and dump fast — late entry is better than early.
-            pool_d_entry_threshold = 25
+            pool_d_entry_threshold = 40
             pool_d_results = [r for r in results if r.get("pool") == "D"
                               and r["momentum_score"] >= pool_d_entry_threshold
                               and r["signals"].get("accumulation", {}).get("score", 0) >= 20]
