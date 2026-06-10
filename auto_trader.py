@@ -89,6 +89,8 @@ CRIME_HALF_SIZE_THRESHOLD = 30
 SCALEOUT_PCT = 25               # take 50% off at +25%
 SCALEOUT_RATIO = 0.5            # sell this fraction at first target
 OI_DIVERGENCE_PCT = 20          # exit runner if OI drops 20%+ from peak while price near highs
+FUNDING_DEEP_NEG_THRESHOLD = -0.003   # funding rate per cycle considered "deeply negative"
+FUNDING_DECAY_RATIO = 0.30            # exit when funding decays to <30% of peak magnitude
 RATCHET_TIERS = [               # (pnl_threshold, lock_floor) — safety net for runner
     (200, 80),                  # hit +200% → floor at +80%
     (100, 30),                  # hit +100% → floor at +30%
@@ -401,6 +403,36 @@ def get_current_oi(base_url: str, symbol: str) -> float:
     return 0.0
 
 
+def get_current_funding(base_url: str, symbol: str) -> float | None:
+    """Fetch latest funding rate. Returns rate per cycle (e.g. -0.025 = -2.5%)."""
+    from momentum_scanner import fetch_funding_history
+    records = fetch_funding_history(base_url, symbol)
+    if records:
+        try:
+            return float(records[0].get("fundingRate", 0))
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+def check_funding_decay(base_url: str, symbol: str,
+                        peak_neg_funding: float) -> str | None:
+    """Detect funding normalization: deeply negative funding flattening out.
+    Squeeze fuel exhausted — no more short liquidation cascades.
+    Returns exit reason string or None."""
+    if peak_neg_funding >= FUNDING_DEEP_NEG_THRESHOLD:
+        return None
+    current = get_current_funding(base_url, symbol)
+    if current is None:
+        return None
+    peak_magnitude = abs(peak_neg_funding)
+    current_magnitude = abs(min(current, 0))
+    if current_magnitude < peak_magnitude * FUNDING_DECAY_RATIO:
+        return (f"FUNDING DECAY: peak was {peak_neg_funding*100:+.2f}%/cycle, "
+                f"now {current*100:+.2f}% — squeeze fuel exhausted")
+    return None
+
+
 # ──────────────────────────────────────────────
 # Paper trading (non-live P&L tracking)
 # ──────────────────────────────────────────────
@@ -460,6 +492,7 @@ class MomentumPaperTrader:
             "score": score,
             "peak_pnl_pct": 0.0,
             "peak_oi": 0.0,
+            "peak_neg_funding": 0.0,
             "scaled_out": False,
             "original_trade_size": size,
         }
@@ -997,6 +1030,11 @@ def run_auto_trader(args):
                     if cur_oi > pos_data.get("peak_oi", 0):
                         pos_data["peak_oi"] = cur_oi
 
+                    # Update peak negative funding tracking
+                    cur_funding = get_current_funding(base_url, sym)
+                    if cur_funding is not None and cur_funding < pos_data.get("peak_neg_funding", 0):
+                        pos_data["peak_neg_funding"] = cur_funding
+
                     # Scale out: sell 50% at +25%
                     if pnl >= SCALEOUT_PCT and not pos_data.get("scaled_out"):
                         if args.live:
@@ -1018,6 +1056,18 @@ def run_auto_trader(args):
                                 _close_live_position(base_url, api_key, api_secret, sym,
                                                      live_positions, args.leverage, entry_price,
                                                      entry_unix, current_price, pnl, oi_reason, live_tracker)
+                            continue
+
+                        # Funding decay: deeply negative funding flattening out
+                        fund_reason = check_funding_decay(
+                            base_url, sym, pos_data.get("peak_neg_funding", 0))
+                        if fund_reason:
+                            if not args.live:
+                                tracker.exit(sym, current_price, fund_reason)
+                            else:
+                                _close_live_position(base_url, api_key, api_secret, sym,
+                                                     live_positions, args.leverage, entry_price,
+                                                     entry_unix, current_price, pnl, fund_reason, live_tracker)
                             continue
 
                         # Structure break: 1h close below most recent higher low
@@ -1342,6 +1392,10 @@ def run_auto_trader(args):
                         if cur_oi > pos.get("peak_oi", 0):
                             pos["peak_oi"] = cur_oi
 
+                        cur_funding = get_current_funding(base_url, sym)
+                        if cur_funding is not None and cur_funding < pos.get("peak_neg_funding", 0):
+                            pos["peak_neg_funding"] = cur_funding
+
                         if pnl >= SCALEOUT_PCT and not pos.get("scaled_out"):
                             if args.live:
                                 _partial_close_live(base_url, api_key, api_secret, sym,
@@ -1361,6 +1415,18 @@ def run_auto_trader(args):
                                                          live_pos_check, args.leverage,
                                                          entry_price, entry_unix,
                                                          current_price, pnl, oi_reason, live_tracker)
+                                continue
+
+                            fund_reason = check_funding_decay(
+                                base_url, sym, pos.get("peak_neg_funding", 0))
+                            if fund_reason:
+                                if not args.live:
+                                    tracker.exit(sym, current_price, fund_reason)
+                                else:
+                                    _close_live_position(base_url, api_key, api_secret, sym,
+                                                         live_pos_check, args.leverage,
+                                                         entry_price, entry_unix,
+                                                         current_price, pnl, fund_reason, live_tracker)
                                 continue
 
                             struct_reason = check_structure_break(base_url, sym)
