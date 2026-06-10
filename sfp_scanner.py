@@ -105,11 +105,13 @@ RE_ENTRY_COOLDOWN_HOURS = 6
 
 TRAILING_TIERS = [
     (0,    0),
-    (10,   8.0),
-    (30,   6.0),
-    (100,  3.0),
-    (300,  2.0),
+    (5,    3.0),
+    (15,   5.0),
+    (50,   3.0),
+    (150,  2.0),
 ]
+STALE_HOURS = 24                # cut positions going nowhere after 24h
+STALE_PNL_RANGE = (-5, 5)       # only cut if P&L is in dead-money zone
 
 SFP_TRADE_LOG = "sfp_trade_log.csv"
 SFP_EXIT_LOG = "sfp_exit_log.csv"
@@ -1033,6 +1035,13 @@ class PaperTrader:
                 drawdown = peak_pnl - pnl_pct
                 if drawdown >= trail_pct:
                     to_close.append((symbol, price, pnl_pct, f"trailing stop ({trail_pct}%)"))
+                    continue
+
+            # Stale position exit: cut dead money
+            held_hours = (time.time() - pos.get("entry_unix", time.time())) / 3600
+            if held_hours >= STALE_HOURS and STALE_PNL_RANGE[0] <= pnl_pct <= STALE_PNL_RANGE[1]:
+                to_close.append((symbol, price, pnl_pct,
+                                 f"stale: {pnl_pct:+.1f}% after {held_hours:.0f}h"))
 
         closed = []
         for symbol, price, pnl_pct, reason in to_close:
