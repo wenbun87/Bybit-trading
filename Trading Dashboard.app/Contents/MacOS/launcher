@@ -9,6 +9,9 @@ LOG="/tmp/trading-dashboard.log"
 # and pick the first one that has the dashboard dependencies installed.
 CANDIDATES=(
     "$(command -v python3 2>/dev/null)"
+    "$HOME/trading-venv/bin/python3"
+    "$REPO/venv/bin/python3"
+    "$REPO/.venv/bin/python3"
     /opt/homebrew/bin/python3
     /usr/local/bin/python3
     /usr/bin/python3
@@ -36,7 +39,7 @@ if [ -z "$PY" ]; then
     done
     MSG="No Python with fastapi+uvicorn found."
     [ -n "$FOUND" ] && MSG="$MSG\n\nPythons found (missing deps):$FOUND"
-    MSG="$MSG\n\nOpen Terminal and run:\n  pip3 install fastapi uvicorn"
+    MSG="$MSG\n\nOpen Terminal and run:\n  python3 -m venv ~/trading-venv\n  source ~/trading-venv/bin/activate\n  pip install fastapi uvicorn"
     osascript -e "display dialog \"$MSG\" buttons {\"OK\"} default button \"OK\" with title \"Trading Dashboard\"" >/dev/null 2>&1
     exit 1
 fi
