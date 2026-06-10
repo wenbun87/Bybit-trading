@@ -3,191 +3,341 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Trading Bot Dashboard</title>
+    <title>Trading Dashboard</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg-primary: #0b0e11;
+            --bg-card: #141619;
+            --bg-card-hover: #1a1d21;
+            --bg-input: #1e2026;
+            --border: #2b2f36;
+            --border-light: #363a42;
+            --text-primary: #eaecef;
+            --text-secondary: #848e9c;
+            --text-muted: #5e6673;
+            --green: #0ecb81;
+            --green-bg: rgba(14, 203, 129, 0.08);
+            --green-border: rgba(14, 203, 129, 0.25);
+            --red: #f6465d;
+            --red-bg: rgba(246, 70, 93, 0.08);
+            --red-border: rgba(246, 70, 93, 0.25);
+            --accent: #f0b90b;
+            --accent-bg: rgba(240, 185, 11, 0.08);
+            --accent-border: rgba(240, 185, 11, 0.25);
+            --blue: #1e9cf4;
+            --blue-bg: rgba(30, 156, 244, 0.08);
+            --radius: 8px;
+            --font: 'Inter', -apple-system, system-ui, sans-serif;
+            --mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+        }
+
         body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-            background: #f5f6f8;
-            color: #374151;
-            padding: 24px 28px;
+            font-family: var(--font);
+            background: var(--bg-primary);
+            color: var(--text-primary);
             min-height: 100vh;
-        }
-        .dashboard-header {
-            text-align: center;
-            margin-bottom: 28px;
-        }
-        .dashboard-header h1 {
-            color: #111827;
-            font-size: 1.3em;
-            font-weight: 600;
-            letter-spacing: 0.02em;
-        }
-        .dashboard-header .subtitle {
-            color: #9ca3af;
-            font-size: 0.72em;
-            margin-top: 6px;
             line-height: 1.5;
         }
 
-        /* Stats bar */
-        .stats-bar {
+        /* ── Header ── */
+        .header {
+            padding: 20px 28px 0;
+            max-width: 1440px;
+            margin: 0 auto;
             display: flex;
-            gap: 14px;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .logo {
+            width: 28px;
+            height: 28px;
+            background: var(--accent);
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
             justify-content: center;
-            margin-bottom: 22px;
+            font-weight: 700;
+            font-size: 14px;
+            color: #0b0e11;
+        }
+        .header h1 {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        .header-meta {
+            font-size: 12px;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        .header-meta .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            display: inline-block;
+        }
+        .header-meta .dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+        /* ── Layout ── */
+        .container {
+            max-width: 1440px;
+            margin: 0 auto;
+            padding: 20px 28px 40px;
+        }
+
+        /* ── Stats Grid ── */
+        .stats-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+        .bot-stats-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 16px 20px;
+        }
+        .bot-stats-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 14px;
+        }
+        .bot-stats-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        .bot-stats-runtime {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-family: var(--mono);
+        }
+        .metrics-row {
+            display: flex;
+            gap: 6px;
             flex-wrap: wrap;
         }
-        .stat-card {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 10px;
-            padding: 14px 24px;
+        .metric {
+            flex: 1;
+            min-width: 80px;
+            background: var(--bg-input);
+            border-radius: 6px;
+            padding: 10px 12px;
             text-align: center;
-            min-width: 135px;
-            transition: border-color 0.2s;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.04);
         }
-        .stat-card:hover {
-            border-color: #d1d5db;
-        }
-        .stat-value {
-            font-size: 1.3em;
-            font-weight: 700;
-            color: #111827;
-            font-variant-numeric: tabular-nums;
-        }
-        .stat-label {
-            font-size: 0.68em;
-            color: #9ca3af;
-            margin-top: 5px;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
-        }
-        .pnl-positive { color: #059669; }
-        .pnl-negative { color: #dc2626; }
-
-        /* Panels */
-        .panel {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 10px;
-            padding: 20px;
-            margin-bottom: 18px;
-            max-width: 1600px;
-            margin-left: auto;
-            margin-right: auto;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-        }
-        .panel h2 {
-            font-size: 0.88em;
-            color: #374151;
-            margin-bottom: 14px;
+        .metric-value {
+            font-size: 15px;
             font-weight: 600;
+            font-family: var(--mono);
+            font-variant-numeric: tabular-nums;
+            color: var(--text-primary);
+        }
+        .metric-label {
+            font-size: 10px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-top: 4px;
         }
 
-        /* Tables */
+        /* Combined totals */
+        .combined-bar {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+        .combined-stat {
+            flex: 1;
+            min-width: 140px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 14px 18px;
+            text-align: center;
+        }
+        .combined-stat .metric-value { font-size: 18px; }
+        .combined-stat .metric-label { font-size: 11px; margin-top: 5px; }
+
+        /* ── Tables ── */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            margin-bottom: 16px;
+            overflow: hidden;
+        }
+        .card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 20px;
+            border-bottom: 1px solid var(--border);
+        }
+        .card-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        .card-body { padding: 0; }
+
         table {
             width: 100%;
             border-collapse: collapse;
-            font-size: 0.78em;
+            font-size: 12px;
         }
         th {
             text-align: left;
-            padding: 8px 12px;
-            color: #9ca3af;
-            border-bottom: 1px solid #e5e7eb;
+            padding: 10px 16px;
+            color: var(--text-muted);
             font-weight: 500;
-            font-size: 0.9em;
+            font-size: 11px;
             text-transform: uppercase;
-            letter-spacing: 0.03em;
+            letter-spacing: 0.04em;
+            background: var(--bg-input);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
         }
         td {
-            padding: 8px 12px;
-            border-bottom: 1px solid #f3f4f6;
-            color: #374151;
+            padding: 10px 16px;
+            border-bottom: 1px solid rgba(43, 47, 54, 0.5);
+            color: var(--text-secondary);
+            font-family: var(--mono);
+            font-size: 12px;
         }
-        tr:hover td {
-            background: #f9fafb;
-        }
+        tr:hover td { background: var(--bg-card-hover); }
         .empty-row td {
-            color: #9ca3af;
+            color: var(--text-muted);
             text-align: center;
-            padding: 20px;
-            font-style: italic;
+            padding: 32px 16px;
+            font-family: var(--font);
+            font-style: normal;
         }
-        .empty-row:hover td { background: none; }
+        .empty-row:hover td { background: transparent; }
 
-        /* History toggle */
-        .history-toggle {
+        .pnl-positive { color: var(--green); }
+        .pnl-negative { color: var(--red); }
+        .symbol-cell { color: var(--text-primary); font-weight: 500; }
+        .side-long {
+            color: var(--green);
+            background: var(--green-bg);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+        .side-short {
+            color: var(--red);
+            background: var(--red-bg);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+
+        /* ── Collapsible history ── */
+        .toggle-header {
             cursor: pointer;
             user-select: none;
             display: flex;
             align-items: center;
             gap: 8px;
         }
-        .history-toggle:hover { color: #2563eb; }
-        .history-arrow {
-            font-size: 0.7em;
-            color: #9ca3af;
+        .toggle-header:hover .card-title { color: var(--accent); }
+        .toggle-arrow {
+            font-size: 10px;
+            color: var(--text-muted);
             transition: transform 0.2s;
         }
         .hidden { display: none; }
 
-        /* Bot grid */
-        .grid {
+        .btn-download {
+            font-size: 11px;
+            color: var(--accent);
+            text-decoration: none;
+            padding: 5px 12px;
+            border: 1px solid var(--accent-border);
+            border-radius: 6px;
+            background: var(--accent-bg);
+            transition: all 0.15s;
+            font-family: var(--font);
+            font-weight: 500;
+        }
+        .btn-download:hover {
+            background: rgba(240, 185, 11, 0.15);
+            border-color: rgba(240, 185, 11, 0.4);
+        }
+
+        /* ── Bot Controls Grid ── */
+        .bots-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 18px;
-            max-width: 1600px;
-            margin: 0 auto;
+            gap: 16px;
         }
         .bot-panel {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 10px;
-            padding: 20px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
             display: flex;
             flex-direction: column;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+            overflow: hidden;
         }
-        .bot-header {
+        .bot-panel-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 14px;
+            padding: 14px 20px;
+            border-bottom: 1px solid var(--border);
         }
         .bot-name {
-            font-size: 0.95em;
+            font-size: 13px;
             font-weight: 600;
-            color: #111827;
+            color: var(--text-primary);
         }
         .status-badge {
-            padding: 4px 10px;
-            border-radius: 10px;
-            font-size: 0.68em;
+            padding: 3px 10px;
+            border-radius: 4px;
+            font-size: 10px;
             font-weight: 600;
             text-transform: uppercase;
-            letter-spacing: 0.04em;
+            letter-spacing: 0.06em;
+            font-family: var(--mono);
         }
         .status-running {
-            background: rgba(5, 150, 105, 0.08);
-            color: #059669;
-            border: 1px solid rgba(5, 150, 105, 0.2);
+            background: var(--green-bg);
+            color: var(--green);
+            border: 1px solid var(--green-border);
         }
         .status-stopped {
-            background: rgba(107, 114, 128, 0.08);
-            color: #9ca3af;
-            border: 1px solid rgba(107, 114, 128, 0.2);
+            background: rgba(94, 102, 115, 0.1);
+            color: var(--text-muted);
+            border: 1px solid rgba(94, 102, 115, 0.2);
         }
 
-        /* Controls */
-        .controls {
+        /* Controls bar */
+        .controls-bar {
             display: flex;
-            gap: 10px;
+            gap: 8px;
             flex-wrap: wrap;
-            margin-bottom: 14px;
             align-items: center;
+            padding: 12px 20px;
+            border-bottom: 1px solid var(--border);
+            background: rgba(30, 32, 38, 0.5);
         }
         .control-group {
             display: flex;
@@ -195,326 +345,376 @@
             gap: 6px;
         }
         .control-group label {
-            font-size: 0.75em;
-            color: #6b7280;
+            font-size: 11px;
+            color: var(--text-muted);
+            white-space: nowrap;
         }
         input[type="number"] {
-            width: 80px;
+            width: 75px;
             padding: 6px 8px;
-            background: #f9fafb;
-            border: 1px solid #d1d5db;
-            border-radius: 6px;
-            color: #374151;
-            font-size: 0.82em;
-            font-family: inherit;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            color: var(--text-primary);
+            font-size: 12px;
+            font-family: var(--mono);
             transition: border-color 0.15s;
         }
         input[type="number"]:focus {
-            border-color: #2563eb;
+            border-color: var(--accent);
             outline: none;
-            box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
+            box-shadow: 0 0 0 2px var(--accent-bg);
+        }
+        .control-sep {
+            width: 1px;
+            height: 24px;
+            background: var(--border);
+            margin: 0 4px;
         }
         .btn {
             padding: 6px 14px;
-            border: 1px solid #d1d5db;
-            border-radius: 7px;
-            font-size: 0.78em;
-            font-weight: 500;
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            font-size: 11px;
+            font-weight: 600;
             cursor: pointer;
-            font-family: inherit;
+            font-family: var(--font);
             transition: all 0.15s;
-            background: #ffffff;
+            background: var(--bg-input);
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
         }
-        .btn:hover { filter: brightness(0.97); }
+        .btn:hover { border-color: var(--border-light); background: var(--bg-card-hover); }
         .btn:active { transform: scale(0.97); }
         .btn-start {
-            background: #059669;
-            color: #ffffff;
-            border-color: #059669;
+            background: var(--green-bg);
+            color: var(--green);
+            border-color: var(--green-border);
         }
+        .btn-start:hover { background: rgba(14, 203, 129, 0.15); }
         .btn-stop {
-            background: #dc2626;
-            color: #ffffff;
-            border-color: #dc2626;
+            background: var(--red-bg);
+            color: var(--red);
+            border-color: var(--red-border);
         }
+        .btn-stop:hover { background: rgba(246, 70, 93, 0.15); }
         .btn-caff {
-            background: #f3f4f6;
-            color: #6b7280;
-            border-color: #d1d5db;
+            background: transparent;
+            color: var(--text-muted);
+            border-color: var(--border);
         }
         .btn-caff.active {
-            background: rgba(37, 99, 235, 0.08);
-            color: #2563eb;
-            border-color: rgba(37, 99, 235, 0.3);
+            background: var(--blue-bg);
+            color: var(--blue);
+            border-color: rgba(30, 156, 244, 0.3);
         }
         .btn:disabled {
-            opacity: 0.35;
+            opacity: 0.3;
             cursor: not-allowed;
         }
         .checkbox-group {
             display: flex;
             align-items: center;
             gap: 5px;
-            font-size: 0.75em;
-            color: #6b7280;
+            font-size: 11px;
+            color: var(--text-muted);
         }
-        .checkbox-group input {
-            margin: 0;
-            accent-color: #2563eb;
+        .checkbox-group input[type="checkbox"] {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 14px;
+            height: 14px;
+            border: 1px solid var(--border-light);
+            border-radius: 3px;
+            background: var(--bg-input);
+            cursor: pointer;
+            position: relative;
+        }
+        .checkbox-group input[type="checkbox"]:checked {
+            background: var(--accent);
+            border-color: var(--accent);
+        }
+        .checkbox-group input[type="checkbox"]:checked::after {
+            content: '';
+            position: absolute;
+            left: 4px;
+            top: 1px;
+            width: 4px;
+            height: 8px;
+            border: solid #0b0e11;
+            border-width: 0 2px 2px 0;
+            transform: rotate(45deg);
         }
 
-        /* Logs */
+        /* Log area */
         .log-container {
             flex: 1;
-            min-height: 380px;
-            max-height: 55vh;
-            background: #1e293b;
-            border: 1px solid #334155;
-            border-radius: 8px;
+            min-height: 340px;
+            max-height: 50vh;
+            background: #0d1117;
             overflow-y: auto;
-            padding: 12px;
-            font-size: 0.7em;
-            font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Menlo', monospace;
-            line-height: 1.55;
+            padding: 12px 16px;
+            font-size: 11px;
+            font-family: var(--mono);
+            line-height: 1.65;
             white-space: pre-wrap;
             word-break: break-all;
         }
-        .log-line { color: #94a3b8; }
-        .uptime {
-            font-size: 0.7em;
-            color: #9ca3af;
-            margin-top: 8px;
+        .log-line { color: #7d8590; }
+        .uptime-bar {
+            font-size: 11px;
+            color: var(--text-muted);
+            padding: 8px 20px;
             text-align: right;
+            border-top: 1px solid var(--border);
+            font-family: var(--mono);
         }
 
-        /* Scrollbar */
-        ::-webkit-scrollbar { width: 6px; }
+        /* ── Scrollbar ── */
+        ::-webkit-scrollbar { width: 5px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb {
-            background: #d1d5db;
+            background: var(--border);
             border-radius: 3px;
         }
-        ::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--border-light); }
 
         @media (max-width: 1000px) {
-            .grid { grid-template-columns: 1fr; }
+            .stats-section, .bots-grid { grid-template-columns: 1fr; }
+            .combined-bar { flex-direction: column; }
         }
     </style>
 </head>
 <body>
-    <div class="dashboard-header">
-        <h1>Trading Dashboard</h1>
-        <div class="subtitle">
-            Live trades OFF = paper trading on real Bybit data &nbsp;&middot;&nbsp;
-            Live trades ON = real orders via API keys
+    <div class="header">
+        <div class="header-left">
+            <div class="logo">B</div>
+            <h1>Trading Dashboard</h1>
+        </div>
+        <div class="header-meta">
+            <span id="stat-runtime" style="font-family:var(--mono)">--:--:--</span>
+            <span>Paper = simulated &middot; Live = real orders</span>
         </div>
     </div>
 
-    <!-- Per-bot P&L trackers -->
-    <div style="display:flex; gap:16px; margin-bottom:22px; flex-wrap:wrap; max-width:1600px; margin-left:auto; margin-right:auto">
-        <!-- Accumulation Bot Stats -->
-        <div class="panel" style="flex:1; min-width:300px; margin-bottom:0; padding:16px 20px">
-            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px">
-                <h2 style="margin:0; font-size:0.85em">Accumulation Bot</h2>
-                <span style="font-size:0.68em; color:#9ca3af" id="stat-runtime">—</span>
-            </div>
-            <div class="stats-bar" style="margin-bottom:0; justify-content:flex-start; gap:10px; flex-wrap:wrap">
-                <div class="stat-card" style="padding:10px 16px; min-width:auto">
-                    <div class="stat-value" style="font-size:1.1em" id="acc-pnl-paper">—</div>
-                    <div class="stat-label">Paper P&L</div>
+    <div class="container">
+        <!-- Per-bot stats -->
+        <div class="stats-section">
+            <div class="bot-stats-card">
+                <div class="bot-stats-header">
+                    <span class="bot-stats-title">Accumulation Bot</span>
                 </div>
-                <div class="stat-card" style="padding:10px 16px; min-width:auto">
-                    <div class="stat-value" style="font-size:1.1em" id="acc-pnl-live">—</div>
-                    <div class="stat-label">Live P&L</div>
-                </div>
-                <div class="stat-card" style="padding:10px 16px; min-width:auto">
-                    <div class="stat-value" style="font-size:1.1em" id="acc-pnl-unrealized">—</div>
-                    <div class="stat-label">Unrealized</div>
-                </div>
-                <div class="stat-card" style="padding:10px 16px; min-width:auto">
-                    <div class="stat-value" style="font-size:1.1em" id="acc-winrate">—</div>
-                    <div class="stat-label">Win Rate</div>
-                </div>
-                <div class="stat-card" style="padding:10px 16px; min-width:auto">
-                    <div class="stat-value" style="font-size:1.1em" id="acc-trades">—</div>
-                    <div class="stat-label">Trades</div>
-                </div>
-                <div class="stat-card" style="padding:10px 16px; min-width:auto">
-                    <div class="stat-value" style="font-size:1.1em" id="acc-open">—</div>
-                    <div class="stat-label">Open</div>
-                </div>
-            </div>
-        </div>
-        <!-- SFP Bot Stats -->
-        <div class="panel" style="flex:1; min-width:300px; margin-bottom:0; padding:16px 20px">
-            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px">
-                <h2 style="margin:0; font-size:0.85em">SFP Scanner</h2>
-            </div>
-            <div class="stats-bar" style="margin-bottom:0; justify-content:flex-start; gap:10px; flex-wrap:wrap">
-                <div class="stat-card" style="padding:10px 16px; min-width:auto">
-                    <div class="stat-value" style="font-size:1.1em" id="sfp-pnl-paper">—</div>
-                    <div class="stat-label">Paper P&L</div>
-                </div>
-                <div class="stat-card" style="padding:10px 16px; min-width:auto">
-                    <div class="stat-value" style="font-size:1.1em" id="sfp-pnl-live">—</div>
-                    <div class="stat-label">Live P&L</div>
-                </div>
-                <div class="stat-card" style="padding:10px 16px; min-width:auto">
-                    <div class="stat-value" style="font-size:1.1em" id="sfp-pnl-unrealized">—</div>
-                    <div class="stat-label">Unrealized</div>
-                </div>
-                <div class="stat-card" style="padding:10px 16px; min-width:auto">
-                    <div class="stat-value" style="font-size:1.1em" id="sfp-winrate">—</div>
-                    <div class="stat-label">Win Rate</div>
-                </div>
-                <div class="stat-card" style="padding:10px 16px; min-width:auto">
-                    <div class="stat-value" style="font-size:1.1em" id="sfp-trades">—</div>
-                    <div class="stat-label">Trades</div>
-                </div>
-                <div class="stat-card" style="padding:10px 16px; min-width:auto">
-                    <div class="stat-value" style="font-size:1.1em" id="sfp-open">—</div>
-                    <div class="stat-label">Open</div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-value" id="acc-pnl-paper">--</div>
+                        <div class="metric-label">Paper P&L</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="acc-pnl-live">--</div>
+                        <div class="metric-label">Live P&L</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="acc-pnl-unrealized">--</div>
+                        <div class="metric-label">Unrealized</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="acc-winrate">--</div>
+                        <div class="metric-label">Win Rate</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="acc-trades">--</div>
+                        <div class="metric-label">Trades</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="acc-open">--</div>
+                        <div class="metric-label">Open</div>
+                    </div>
                 </div>
             </div>
-        </div>
-    </div>
-    <!-- Combined totals -->
-    <div class="stats-bar" id="stats-bar" style="margin-bottom:22px">
-        <div class="stat-card">
-            <div class="stat-value" id="stat-pnl">—</div>
-            <div class="stat-label">Combined P&L ($)</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-value" id="stat-winrate">—</div>
-            <div class="stat-label">Combined Win Rate</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-value" id="stat-open">—</div>
-            <div class="stat-label">Open Positions</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-value" id="stat-total">—</div>
-            <div class="stat-label">Total Trades</div>
-        </div>
-    </div>
-
-    <!-- Open positions panel -->
-    <div class="panel">
-        <h2>Open Positions</h2>
-        <table id="positions-table">
-            <thead>
-                <tr>
-                    <th>Bot</th>
-                    <th>Symbol</th>
-                    <th>Side</th>
-                    <th>Score</th>
-                    <th>Size</th>
-                    <th>Entry</th>
-                    <th>Current</th>
-                    <th>P&L %</th>
-                    <th>P&L $</th>
-                    <th>Leverage</th>
-                    <th>Held</th>
-                </tr>
-            </thead>
-            <tbody id="positions-tbody">
-                <tr class="empty-row"><td colspan="11">No open positions</td></tr>
-            </tbody>
-        </table>
-    </div>
-
-    <!-- Trade history panel (collapsible) -->
-    <div class="panel">
-        <div style="display:flex; align-items:center; justify-content:space-between">
-            <h2 class="history-toggle" onclick="toggleHistory()" style="margin:0">
-                Trade History <span class="history-arrow" id="history-arrow">&#9660;</span>
-            </h2>
-            <a href="/api/trades/download" style="font-size:13px; color:#6366f1; text-decoration:none; padding:4px 12px; border:1px solid #6366f1; border-radius:6px; cursor:pointer">Download CSV</a>
-        </div>
-        <div id="history-body">
-            <table id="history-table">
-                <thead>
-                    <tr>
-                        <th>Run</th>
-                        <th>Date</th>
-                        <th>Bot</th>
-                        <th>Symbol</th>
-                        <th>Side</th>
-                        <th>Score</th>
-                        <th>Size</th>
-                        <th>Entry</th>
-                        <th>Exit</th>
-                        <th>P&L %</th>
-                        <th>P&L $</th>
-                        <th>Duration</th>
-                    </tr>
-                </thead>
-                <tbody id="history-tbody">
-                    <tr class="empty-row"><td colspan="12">No trade history</td></tr>
-                </tbody>
-            </table>
-        </div>
-    </div>
-
-    <div class="grid">
-        <div class="bot-panel" id="panel-auto_trader">
-            <div class="bot-header">
-                <span class="bot-name">Accumulation Trader</span>
-                <span class="status-badge status-stopped" id="status-auto_trader">STOPPED</span>
+            <div class="bot-stats-card">
+                <div class="bot-stats-header">
+                    <span class="bot-stats-title">SFP Scanner</span>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-value" id="sfp-pnl-paper">--</div>
+                        <div class="metric-label">Paper P&L</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="sfp-pnl-live">--</div>
+                        <div class="metric-label">Live P&L</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="sfp-pnl-unrealized">--</div>
+                        <div class="metric-label">Unrealized</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="sfp-winrate">--</div>
+                        <div class="metric-label">Win Rate</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="sfp-trades">--</div>
+                        <div class="metric-label">Trades</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="sfp-open">--</div>
+                        <div class="metric-label">Open</div>
+                    </div>
+                </div>
             </div>
-            <div class="controls">
-                <div class="control-group">
-                    <label>Capital $</label>
-                    <input type="number" id="balance-auto_trader" value="500" min="50" max="100000" step="100"
-                        title="Your capital — bot sizes trades as a fraction of this">
-                </div>
-                <div class="control-group">
-                    <label>Max Exposure</label>
-                    <input type="number" id="exposure-auto_trader" value="10" min="1" max="20" step="1"
-                        title="Max total open notional = Capital × this. E.g. $500 × 5x = $2,500 max across all positions" style="width:55px">
-                    <label style="color:#9ca3af">x capital</label>
-                </div>
-                <div class="checkbox-group">
-                    <input type="checkbox" id="live-auto_trader">
-                    <label for="live-auto_trader" title="OFF = paper trades, ON = real money">Live trades</label>
-                </div>
-                <button class="btn btn-start" onclick="startBot('auto_trader')">Start</button>
-                <button class="btn btn-stop" onclick="stopBot('auto_trader')">Stop</button>
-                <button class="btn btn-caff" id="caff-auto_trader" onclick="toggleCaff('auto_trader')"
-                    title="Prevent system idle sleep while bot runs (screen can still sleep)">Keep Awake</button>
-            </div>
-            <div class="log-container" id="logs-auto_trader"></div>
-            <div class="uptime" id="uptime-auto_trader"></div>
         </div>
 
-        <div class="bot-panel" id="panel-sfp_scanner">
-            <div class="bot-header">
-                <span class="bot-name">SFP Scanner</span>
-                <span class="status-badge status-stopped" id="status-sfp_scanner">STOPPED</span>
+        <!-- Combined totals -->
+        <div class="combined-bar">
+            <div class="combined-stat">
+                <div class="metric-value" id="stat-pnl">--</div>
+                <div class="metric-label">Combined P&L</div>
             </div>
-            <div class="controls">
-                <div class="control-group">
-                    <label>Capital $</label>
-                    <input type="number" id="balance-sfp_scanner" value="500" min="50" max="100000" step="100"
-                        title="Your capital — max exposure = Capital × multiplier">
-                </div>
-                <div class="control-group">
-                    <label>Max Exposure</label>
-                    <input type="number" id="exposure-sfp_scanner" value="10" min="1" max="20" step="1"
-                        title="Max total open notional = Capital × this" style="width:55px">
-                    <label style="color:#9ca3af">x capital</label>
-                </div>
-                <div class="checkbox-group">
-                    <input type="checkbox" id="live-sfp_scanner">
-                    <label for="live-sfp_scanner" title="OFF = paper trades, ON = real money">Live trades</label>
-                </div>
-                <button class="btn btn-start" onclick="startBot('sfp_scanner')">Start</button>
-                <button class="btn btn-stop" onclick="stopBot('sfp_scanner')">Stop</button>
-                <button class="btn btn-caff" id="caff-sfp_scanner" onclick="toggleCaff('sfp_scanner')"
-                    title="Prevent system idle sleep while bot runs (screen can still sleep)">Keep Awake</button>
+            <div class="combined-stat">
+                <div class="metric-value" id="stat-winrate">--</div>
+                <div class="metric-label">Win Rate</div>
             </div>
-            <div class="log-container" id="logs-sfp_scanner"></div>
-            <div class="uptime" id="uptime-sfp_scanner"></div>
+            <div class="combined-stat">
+                <div class="metric-value" id="stat-open">--</div>
+                <div class="metric-label">Open Positions</div>
+            </div>
+            <div class="combined-stat">
+                <div class="metric-value" id="stat-total">--</div>
+                <div class="metric-label">Total Trades</div>
+            </div>
+        </div>
+
+        <!-- Open Positions -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Open Positions</span>
+            </div>
+            <div class="card-body">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Bot</th>
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th>Score</th>
+                            <th>Size</th>
+                            <th>Entry</th>
+                            <th>Current</th>
+                            <th>P&L %</th>
+                            <th>P&L $</th>
+                            <th>Lev</th>
+                            <th>Held</th>
+                        </tr>
+                    </thead>
+                    <tbody id="positions-tbody">
+                        <tr class="empty-row"><td colspan="11">No open positions</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Trade History -->
+        <div class="card">
+            <div class="card-header">
+                <div class="toggle-header" onclick="toggleHistory()">
+                    <span class="card-title">Trade History</span>
+                    <span class="toggle-arrow" id="history-arrow">&#9660;</span>
+                </div>
+                <a href="/api/trades/download" class="btn-download">Export CSV</a>
+            </div>
+            <div id="history-body" class="card-body">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Run</th>
+                            <th>Date</th>
+                            <th>Bot</th>
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th>Score</th>
+                            <th>Size</th>
+                            <th>Entry</th>
+                            <th>Exit</th>
+                            <th>P&L %</th>
+                            <th>P&L $</th>
+                            <th>Duration</th>
+                        </tr>
+                    </thead>
+                    <tbody id="history-tbody">
+                        <tr class="empty-row"><td colspan="12">No trade history</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Bot Controls -->
+        <div class="bots-grid">
+            <!-- Accumulation Trader -->
+            <div class="bot-panel" id="panel-auto_trader">
+                <div class="bot-panel-header">
+                    <span class="bot-name">Accumulation Trader</span>
+                    <span class="status-badge status-stopped" id="status-auto_trader">STOPPED</span>
+                </div>
+                <div class="controls-bar">
+                    <div class="control-group">
+                        <label>Capital</label>
+                        <input type="number" id="balance-auto_trader" value="500" min="50" max="100000" step="100"
+                            title="Your capital -- bot sizes trades as a fraction of this">
+                    </div>
+                    <div class="control-group">
+                        <label>Exposure</label>
+                        <input type="number" id="exposure-auto_trader" value="10" min="1" max="20" step="1"
+                            title="Max notional = Capital x this" style="width:50px">
+                        <label style="color:var(--text-muted)">x</label>
+                    </div>
+                    <div class="control-sep"></div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="live-auto_trader">
+                        <label for="live-auto_trader" title="OFF = paper, ON = real orders">Live</label>
+                    </div>
+                    <div class="control-sep"></div>
+                    <button class="btn btn-start" onclick="startBot('auto_trader')">Start</button>
+                    <button class="btn btn-stop" onclick="stopBot('auto_trader')">Stop</button>
+                    <button class="btn btn-caff" id="caff-auto_trader" onclick="toggleCaff('auto_trader')"
+                        title="Prevent idle sleep while bot runs">Awake</button>
+                </div>
+                <div class="log-container" id="logs-auto_trader"></div>
+                <div class="uptime-bar" id="uptime-auto_trader"></div>
+            </div>
+
+            <!-- SFP Scanner -->
+            <div class="bot-panel" id="panel-sfp_scanner">
+                <div class="bot-panel-header">
+                    <span class="bot-name">SFP Scanner</span>
+                    <span class="status-badge status-stopped" id="status-sfp_scanner">STOPPED</span>
+                </div>
+                <div class="controls-bar">
+                    <div class="control-group">
+                        <label>Capital</label>
+                        <input type="number" id="balance-sfp_scanner" value="500" min="50" max="100000" step="100"
+                            title="Your capital -- max exposure = Capital x multiplier">
+                    </div>
+                    <div class="control-group">
+                        <label>Exposure</label>
+                        <input type="number" id="exposure-sfp_scanner" value="10" min="1" max="20" step="1"
+                            title="Max notional = Capital x this" style="width:50px">
+                        <label style="color:var(--text-muted)">x</label>
+                    </div>
+                    <div class="control-sep"></div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="live-sfp_scanner">
+                        <label for="live-sfp_scanner" title="OFF = paper, ON = real orders">Live</label>
+                    </div>
+                    <div class="control-sep"></div>
+                    <button class="btn btn-start" onclick="startBot('sfp_scanner')">Start</button>
+                    <button class="btn btn-stop" onclick="stopBot('sfp_scanner')">Stop</button>
+                    <button class="btn btn-caff" id="caff-sfp_scanner" onclick="toggleCaff('sfp_scanner')"
+                        title="Prevent idle sleep while bot runs">Awake</button>
+                </div>
+                <div class="log-container" id="logs-sfp_scanner"></div>
+                <div class="uptime-bar" id="uptime-sfp_scanner"></div>
+            </div>
         </div>
     </div>
 
@@ -528,7 +728,6 @@
             const capital = balEl ? parseFloat(balEl.value) : 500;
             const maxExposureMult = expEl ? parseFloat(expEl.value) : 5;
             const live = document.getElementById(`live-${name}`).checked;
-
             const amountEl = document.getElementById(`amount-${name}`);
             const amount = amountEl ? parseFloat(amountEl.value) : capital;
 
@@ -568,33 +767,24 @@
         }
 
         function connectLogs(name) {
-            if (eventSources[name]) {
-                eventSources[name].close();
-            }
+            if (eventSources[name]) eventSources[name].close();
             const logEl = document.getElementById(`logs-${name}`);
             logEl.innerHTML = '';
-
             const es = new EventSource(`/api/bot/${name}/logs`);
             eventSources[name] = es;
-
             es.onmessage = (event) => {
                 const line = document.createElement('div');
                 line.className = 'log-line';
                 line.textContent = event.data;
                 logEl.appendChild(line);
                 logEl.scrollTop = logEl.scrollHeight;
-                while (logEl.children.length > 800) {
-                    logEl.removeChild(logEl.firstChild);
-                }
+                while (logEl.children.length > 800) logEl.removeChild(logEl.firstChild);
             };
-
-            es.onerror = () => {
-                setTimeout(() => connectLogs(name), 3000);
-            };
+            es.onerror = () => { setTimeout(() => connectLogs(name), 3000); };
         }
 
         function fmtRuntime(seconds) {
-            if (!seconds || seconds <= 0) return '—';
+            if (!seconds || seconds <= 0) return '--:--:--';
             const d = Math.floor(seconds / 86400);
             const h = Math.floor((seconds % 86400) / 3600);
             const m = Math.floor((seconds % 3600) / 60);
@@ -610,10 +800,8 @@
                     const badge = document.getElementById(`status-${bot.name}`);
                     badge.textContent = bot.status.toUpperCase();
                     badge.className = `status-badge status-${bot.status}`;
-
                     const caff = document.getElementById(`caff-${bot.name}`);
                     caff.classList.toggle('active', bot.caffeinate);
-
                     const uptime = document.getElementById(`uptime-${bot.name}`);
                     if (bot.status === 'running' && bot.uptime_s > 0) {
                         uptime.textContent = `Running ${fmtRuntime(bot.uptime_s)}`;
@@ -623,14 +811,12 @@
                     }
                 });
                 document.getElementById('stat-runtime').textContent =
-                    maxUptime > 0 ? fmtRuntime(maxUptime) : '—';
+                    maxUptime > 0 ? fmtRuntime(maxUptime) : '--:--:--';
             });
         }
 
-        // ── Positions & Stats ──
-
         function fmtHeld(seconds) {
-            if (!seconds || seconds < 0) return '—';
+            if (!seconds || seconds < 0) return '--';
             const m = Math.floor(seconds / 60);
             const h = Math.floor(m / 60);
             const d = Math.floor(h / 24);
@@ -639,10 +825,16 @@
         }
 
         function fmtPnl(val, suffix) {
-            if (val === undefined || val === null) return '—';
+            if (val === undefined || val === null) return '--';
             const cls = val > 0 ? 'pnl-positive' : (val < 0 ? 'pnl-negative' : '');
             const sign = val > 0 ? '+' : '';
             return `<span class="${cls}">${sign}${val.toFixed(2)}${suffix}</span>`;
+        }
+
+        function sideHtml(side) {
+            const s = (side || 'long').toUpperCase();
+            const cls = s === 'LONG' ? 'side-long' : 'side-short';
+            return `<span class="${cls}">${s}</span>`;
         }
 
         function refreshPositions() {
@@ -650,7 +842,6 @@
                 fetch('/api/positions').then(r => r.json()),
                 fetch('/api/stats').then(r => r.json()),
             ]).then(([posData, stats]) => {
-                // Per-bot stats (paper / live split)
                 const accStats = stats.accumulation || {};
                 const accPaper = accStats.paper || {};
                 const accLive = accStats.live || {};
@@ -661,24 +852,22 @@
                 document.getElementById('acc-pnl-paper').innerHTML = fmtPnl(accPaper.total_pnl_usd || 0, '');
                 document.getElementById('acc-pnl-live').innerHTML = fmtPnl(accLive.total_pnl_usd || 0, '');
                 document.getElementById('acc-winrate').textContent =
-                    accStats.total_trades > 0 ? accStats.win_rate.toFixed(1) + '%' : '—';
+                    accStats.total_trades > 0 ? accStats.win_rate.toFixed(1) + '%' : '--';
                 document.getElementById('acc-trades').textContent = accStats.total_trades || 0;
 
                 document.getElementById('sfp-pnl-paper').innerHTML = fmtPnl(sfpPaper.total_pnl_usd || 0, '');
                 document.getElementById('sfp-pnl-live').innerHTML = fmtPnl(sfpLive.total_pnl_usd || 0, '');
                 document.getElementById('sfp-winrate').textContent =
-                    sfpStats.total_trades > 0 ? sfpStats.win_rate.toFixed(1) + '%' : '—';
+                    sfpStats.total_trades > 0 ? sfpStats.win_rate.toFixed(1) + '%' : '--';
                 document.getElementById('sfp-trades').textContent = sfpStats.total_trades || 0;
 
-                // Combined stats
                 const totalPnl = (accStats.total_pnl_usd || 0) + (sfpStats.total_pnl_usd || 0);
                 document.getElementById('stat-pnl').innerHTML = fmtPnl(totalPnl, '');
                 document.getElementById('stat-winrate').textContent =
-                    stats.win_rate !== undefined ? stats.win_rate.toFixed(1) + '%' : '—';
+                    stats.win_rate !== undefined ? stats.win_rate.toFixed(1) + '%' : '--';
                 document.getElementById('stat-total').textContent =
-                    stats.total_trades !== undefined ? stats.total_trades : '—';
+                    stats.total_trades !== undefined ? stats.total_trades : '--';
 
-                // Build positions rows + unrealized P&L per bot
                 let openCount = 0;
                 let accOpen = 0, sfpOpen = 0;
                 let accUnrealized = 0, sfpUnrealized = 0;
@@ -703,33 +892,29 @@
                             if (isSfp) sfpUnrealized += pnlUsd;
                         }
                         const heldSec = p.entry_time ? now - p.entry_time : null;
-                        const adds = p.pyramid_adds || 0;
-                        const sizeLabel = sizeUsdt !== null
-                            ? `$${sizeUsdt.toLocaleString()}${adds > 0 ? ` (${adds}↑)` : ''}` : '—';
-                        const scoreLabel = p.grade ? p.grade : (p.score ? p.score.toFixed(0) : '—');
+                        const sizeLabel = sizeUsdt !== null ? `$${sizeUsdt.toLocaleString()}` : '--';
+                        const scoreLabel = p.grade ? p.grade : (p.score ? p.score.toFixed(0) : '--');
                         rows.push(`<tr>
                             <td>${botName}</td>
-                            <td style="color:#111827; font-weight:500">${p.symbol || '—'}</td>
-                            <td>${(p.side || 'long').toUpperCase()}</td>
+                            <td class="symbol-cell">${p.symbol || '--'}</td>
+                            <td>${sideHtml(p.side)}</td>
                             <td>${scoreLabel}</td>
                             <td>${sizeLabel}</td>
-                            <td>${p.entry_price !== undefined ? p.entry_price.toFixed(4) : '—'}</td>
-                            <td>${p.current_price !== undefined ? p.current_price.toFixed(4) : '—'}</td>
-                            <td>${pnlPct !== null ? fmtPnl(pnlPct, '%') : '—'}</td>
-                            <td>${pnlUsd !== null ? fmtPnl(pnlUsd, '') : '—'}</td>
+                            <td>${p.entry_price !== undefined ? p.entry_price.toFixed(4) : '--'}</td>
+                            <td>${p.current_price !== undefined ? p.current_price.toFixed(4) : '--'}</td>
+                            <td>${pnlPct !== null ? fmtPnl(pnlPct, '%') : '--'}</td>
+                            <td>${pnlUsd !== null ? fmtPnl(pnlUsd, '') : '--'}</td>
                             <td>${lev}x</td>
                             <td>${fmtHeld(heldSec)}</td>
                         </tr>`);
                     }
                 }
 
-                // Per-bot unrealized + open counts
                 document.getElementById('acc-pnl-unrealized').innerHTML = fmtPnl(accUnrealized, '');
                 document.getElementById('acc-open').textContent = accOpen;
                 document.getElementById('sfp-pnl-unrealized').innerHTML = fmtPnl(sfpUnrealized, '');
                 document.getElementById('sfp-open').textContent = sfpOpen;
 
-                // Combined P&L includes unrealized
                 const combinedPnl = totalPnl + accUnrealized + sfpUnrealized;
                 document.getElementById('stat-pnl').innerHTML = fmtPnl(combinedPnl, '');
 
@@ -745,34 +930,34 @@
             fetch('/api/trades?limit=20').then(r => r.json()).then(trades => {
                 const tbody = document.getElementById('history-tbody');
                 if (!trades || trades.length === 0) {
-                    tbody.innerHTML = '<tr class="empty-row"><td colspan="11">No trade history</td></tr>';
+                    tbody.innerHTML = '<tr class="empty-row"><td colspan="12">No trade history</td></tr>';
                     return;
                 }
                 const sorted = trades.slice().reverse();
                 const rows = sorted.map(t => {
                     const date = t.closed_at
                         ? new Date(t.closed_at * 1000).toLocaleString()
-                        : '—';
+                        : '--';
                     const dur = (t.entry_time && t.closed_at)
-                        ? fmtHeld(t.closed_at - t.entry_time) : '—';
+                        ? fmtHeld(t.closed_at - t.entry_time) : '--';
                     const pnlPct = t.pnl_pct !== undefined ? t.pnl_pct : null;
                     const pnlUsd = t.pnl_usd !== undefined ? t.pnl_usd : null;
                     const sizeStr = t.size_usdt !== undefined
-                        ? `$${t.size_usdt.toLocaleString()}` : '—';
-                    const runLabel = t.run ? `${t.live ? 'Live' : 'Paper'} ${t.run}` : '—';
-                    const tradeScore = t.grade ? t.grade : (t.score ? t.score.toFixed(0) : '—');
+                        ? `$${t.size_usdt.toLocaleString()}` : '--';
+                    const runLabel = t.run ? `${t.live ? 'Live' : 'Paper'} ${t.run}` : '--';
+                    const tradeScore = t.grade ? t.grade : (t.score ? t.score.toFixed(0) : '--');
                     return `<tr>
-                        <td style="color:#9ca3af">${runLabel}</td>
+                        <td style="color:var(--text-muted)">${runLabel}</td>
                         <td>${date}</td>
-                        <td>${t.bot || '—'}</td>
-                        <td style="color:#111827; font-weight:500">${t.symbol || '—'}</td>
-                        <td>${(t.side || 'long').toUpperCase()}</td>
+                        <td>${t.bot || '--'}</td>
+                        <td class="symbol-cell">${t.symbol || '--'}</td>
+                        <td>${sideHtml(t.side)}</td>
                         <td>${tradeScore}</td>
                         <td>${sizeStr}</td>
-                        <td>${t.entry_price !== undefined ? t.entry_price.toFixed(4) : '—'}</td>
-                        <td>${t.exit_price !== undefined ? t.exit_price.toFixed(4) : '—'}</td>
-                        <td>${pnlPct !== null ? fmtPnl(pnlPct, '%') : '—'}</td>
-                        <td>${pnlUsd !== null ? fmtPnl(pnlUsd, '') : '—'}</td>
+                        <td>${t.entry_price !== undefined ? t.entry_price.toFixed(4) : '--'}</td>
+                        <td>${t.exit_price !== undefined ? t.exit_price.toFixed(4) : '--'}</td>
+                        <td>${pnlPct !== null ? fmtPnl(pnlPct, '%') : '--'}</td>
+                        <td>${pnlUsd !== null ? fmtPnl(pnlUsd, '') : '--'}</td>
                         <td>${dur}</td>
                     </tr>`;
                 });

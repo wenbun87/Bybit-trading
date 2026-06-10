@@ -1,0 +1,33 @@
+#!/bin/bash
+# Trading Dashboard launcher — double-click to start (no terminal needed).
+# Lives inside the repo at: <repo>/Trading Dashboard.app/Contents/MacOS/launcher
+
+REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
+LOG="/tmp/trading-dashboard.log"
+
+# GUI-launched apps get a minimal PATH — search common python3 locations
+# and pick the first one that has the dashboard dependencies installed.
+CANDIDATES=(
+    "$(command -v python3 2>/dev/null)"
+    /opt/homebrew/bin/python3
+    /usr/local/bin/python3
+    /usr/bin/python3
+)
+
+PY=""
+for p in "${CANDIDATES[@]}"; do
+    [ -x "$p" ] || continue
+    if "$p" -c "import fastapi, uvicorn" >/dev/null 2>&1; then
+        PY="$p"
+        break
+    fi
+done
+
+if [ -z "$PY" ]; then
+    osascript -e 'display dialog "Python with fastapi/uvicorn not found.\n\nOpen Terminal and run:\n\npip3 install fastapi uvicorn" buttons {"OK"} default button "OK" with title "Trading Dashboard"' >/dev/null 2>&1
+    exit 1
+fi
+
+cd "$REPO" || exit 1
+echo "=== Launched $(date) with $PY ===" >> "$LOG"
+exec "$PY" run_dashboard.py >> "$LOG" 2>&1
