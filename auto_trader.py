@@ -74,7 +74,14 @@ MAX_TRADES_PER_DAY = 6          # max trades in 24 hours
 DEFAULT_LEVERAGE = 5            # 5x leverage
 RE_ENTRY_COOLDOWN_HOURS = 6     # allow re-entry on same symbol after this cooldown
 MIN_HOLD_SECONDS = 1800         # 30 min minimum hold before signal-based exits (hard exit still active)
-STOP_LOSS_PCT = -15             # hard stop loss — same threshold for paper and live
+STOP_LOSS_PCT = -8              # hard stop loss — tighter to limit damage at 5x leverage
+STALE_HOLD_HOURS = 72           # cut positions going nowhere after 3 days
+STALE_PNL_RANGE = (-10, 5)      # only cut if P&L is between -10% and +5% (dead money zone)
+
+# Lottery mode: tiny positions on likely cabal/scam coins, no stop, let it ride
+LOTTERY_CRIME_THRESHOLD = 40    # crime_pump score above this → lottery sizing
+LOTTERY_SIZE_USDT = 50          # $50 notional per lottery ticket
+
 # Score-based sizing tiers: (min_score, multiplier_of_base)
 SCORE_SIZE_TIERS = [
     (90, 3.0),   # Exceptional → 3x base
@@ -351,7 +358,7 @@ class MomentumPaperTrader:
             print(f"  [State] WARNING: could not load state from {STATE_FILE}: {e}")
             return {}
 
-    def enter(self, symbol, price, score, signals, trade_size=None):
+    def enter(self, symbol, price, score, signals, trade_size=None, lottery=False):
         if symbol in self.positions:
             return
         size = trade_size if trade_size is not None else self.amount
@@ -363,6 +370,7 @@ class MomentumPaperTrader:
             "entry_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             "entry_unix": time.time(),
             "score": score,
+            "lottery": lottery,
         }
         print(f"  [PAPER] LONG {symbol} @ {price:,.6g} | "
               f"Score {score:.0f} | ${size:.0f} x{self.leverage}")
@@ -701,6 +709,9 @@ def run_auto_trader(args):
     print(f"  Strategy:        Pool D accumulation → exit on graduation")
     print(f"  Entry:           Pool D only (score 40+ AND accum signal 20+)")
     print(f"  Watch:           Pool A/B/C coins shown at score {args.min_score}+")
+    print(f"  Stop loss:       {STOP_LOSS_PCT}% (lottery: none)")
+    print(f"  Stale exit:      Cut after {STALE_HOLD_HOURS}h if P&L in [{STALE_PNL_RANGE[0]}%, {STALE_PNL_RANGE[1]}%]")
+    print(f"  Lottery mode:    Crime score {LOTTERY_CRIME_THRESHOLD}+ → ${LOTTERY_SIZE_USDT} ticket, no stop")
     print(f"  Exit:            Pool A/B graduation, funding flip, OI drop, 200%+ extension")
     print(f"  Scan interval:   every {args.interval} minutes")
     print(f"  Max per cycle:   {MAX_TRADES_PER_CYCLE} trades")
@@ -762,11 +773,27 @@ def run_auto_trader(args):
                     continue
 
                 # Use fresh tracker price (just updated above)
-                current_price = tracker.positions[sym].get("current_price", entry_price) if tracker and sym in tracker.positions else entry_price
+                pos_data = tracker.positions.get(sym, {}) if tracker else {}
+                is_lottery = pos_data.get("lottery", False)
+                current_price = pos_data.get("current_price", entry_price)
                 if current_price > 0:
                     pnl = (current_price - entry_price) / entry_price * 100
-                    if pnl <= STOP_LOSS_PCT:
+                    held_hours = (time.time() - entry_unix) / 3600
+
+                    # Hard stop loss (skip for lottery positions — sizing IS the risk management)
+                    if not is_lottery and pnl <= STOP_LOSS_PCT:
                         reason = f"HARD EXIT: P&L {pnl:.1f}% breached {STOP_LOSS_PCT}% stop loss"
+                        if not args.live:
+                            tracker.exit(sym, current_price, reason)
+                        else:
+                            _close_live_position(base_url, api_key, api_secret, sym,
+                                                 live_positions, args.leverage, entry_price,
+                                                 entry_unix, current_price, pnl, reason, live_tracker)
+                        continue
+
+                    # Stale position exit: cut dead money after 3 days
+                    if held_hours >= STALE_HOLD_HOURS and STALE_PNL_RANGE[0] <= pnl <= STALE_PNL_RANGE[1]:
+                        reason = f"STALE: {pnl:+.1f}% after {held_hours:.0f}h — cutting dead money"
                         if not args.live:
                             tracker.exit(sym, current_price, reason)
                         else:
@@ -888,14 +915,23 @@ def run_auto_trader(args):
                         print(f"     SKIP: {reason}")
                         continue
 
-                    # Score-based sizing
-                    trade_size = compute_trade_size(
-                        score, args.account_balance, max_exposure,
-                        session.total_exposure, args.leverage)
+                    # Lottery detection: high crime_pump score → tiny position, no stop
+                    crime_score = signals.get("crime_pump", {}).get("crime_score", 0)
+                    is_lottery = crime_score >= LOTTERY_CRIME_THRESHOLD
+
+                    # Score-based sizing (or lottery sizing)
+                    if is_lottery:
+                        trade_size = min(LOTTERY_SIZE_USDT, max(0, max_exposure - session.total_exposure))
+                        print(f"     LOTTERY: crime score {crime_score:.0f} → ${trade_size:.0f} ticket, no stop loss")
+                    else:
+                        trade_size = compute_trade_size(
+                            score, args.account_balance, max_exposure,
+                            session.total_exposure, args.leverage)
                     if trade_size < 5:
                         print(f"     SKIP: trade size too small (${trade_size:.0f}, exposure cap reached?)")
                         continue
-                    print(f"     SIZE: ${trade_size:.0f} (score {score:.0f} → {trade_size/base_size:.1f}x base)")
+                    if not is_lottery:
+                        print(f"     SIZE: ${trade_size:.0f} (score {score:.0f} → {trade_size/base_size:.1f}x base)")
 
                     # Get instrument info for qty precision
                     instrument = get_instrument_info(base_url, symbol)
@@ -911,14 +947,15 @@ def run_auto_trader(args):
                     est_value = float(qty) * price
                     print(f"     Order: BUY {qty} {symbol} (~${est_value:,.2f}) @ {args.leverage}x leverage")
 
-                    sl_price = price * (1 + STOP_LOSS_PCT / 100)
+                    sl_price = None if is_lottery else price * (1 + STOP_LOSS_PCT / 100)
 
                     if not args.live:
                         # Paper: log and track
                         print(f"     [DRY-RUN] Would place order")
                         log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                                   score, signals, "dry-run", "N/A", "dry-run")
-                        tracker.enter(symbol, price, score, signals, trade_size=trade_size)
+                        tracker.enter(symbol, price, score, signals,
+                                      trade_size=trade_size, lottery=is_lottery)
                         session.record_trade(symbol, est_value)
                         trades_this_cycle += 1
                     else:
@@ -938,7 +975,8 @@ def run_auto_trader(args):
                             print(f"FILLED (orderId: {order_id})")
                             log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                                       score, signals, "filled", order_id, "live")
-                            tracker.enter(symbol, price, score, signals, trade_size=trade_size)
+                            tracker.enter(symbol, price, score, signals,
+                                          trade_size=trade_size, lottery=is_lottery)
                             session.record_trade(symbol, est_value)
                             trades_this_cycle += 1
                         elif ret_code == 10001 and "position idx" in result.get("retMsg", "").lower():
@@ -949,8 +987,9 @@ def run_auto_trader(args):
                                 "category": "linear", "symbol": symbol,
                                 "side": "Buy", "orderType": "Market", "qty": qty,
                                 "orderLinkId": order_link_id, "positionIdx": 1,
-                                "stopLoss": str(sl_price),
                             }
+                            if sl_price is not None:
+                                hedge_params["stopLoss"] = str(sl_price)
                             result2 = api_request(base_url, "POST", "/v5/order/create",
                                                   api_key, api_secret, hedge_params)
                             if result2.get("retCode") == 0:
@@ -958,7 +997,8 @@ def run_auto_trader(args):
                                 print(f"FILLED (orderId: {oid})")
                                 log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                                           score, signals, "filled", oid, "live")
-                                tracker.enter(symbol, price, score, signals, trade_size=trade_size)
+                                tracker.enter(symbol, price, score, signals,
+                                              trade_size=trade_size, lottery=is_lottery)
                                 session.record_trade(symbol, est_value)
                                 trades_this_cycle += 1
                             else:
@@ -1026,19 +1066,38 @@ def run_auto_trader(args):
                     live_pos_check = get_open_positions(base_url, api_key, api_secret) if args.live else []
                     for sym in list(tracker.positions):
                         pos = tracker.positions[sym]
+                        is_lottery = pos.get("lottery", False)
                         current_price = pos.get("current_price", pos["entry_price"])
-                        pnl = (current_price - pos["entry_price"]) / pos["entry_price"] * 100
-                        if pnl <= STOP_LOSS_PCT:
+                        entry_price = pos["entry_price"]
+                        entry_unix = pos.get("entry_unix", 0)
+                        pnl = (current_price - entry_price) / entry_price * 100
+                        held_hours = (time.time() - entry_unix) / 3600
+
+                        # Hard stop (skip for lottery)
+                        if not is_lottery and pnl <= STOP_LOSS_PCT:
                             reason = f"HARD EXIT: P&L {pnl:.1f}% breached {STOP_LOSS_PCT}% stop loss"
                             if not args.live:
                                 tracker.exit(sym, current_price, reason)
                             else:
                                 _close_live_position(base_url, api_key, api_secret, sym,
                                                      live_pos_check, args.leverage,
-                                                     pos["entry_price"], pos.get("entry_unix", 0),
+                                                     entry_price, entry_unix,
                                                      current_price, pnl, reason, live_tracker)
                             continue
-                        held_sec = time.time() - pos.get("entry_unix", 0)
+
+                        # Stale exit: cut dead money after 3 days
+                        if held_hours >= STALE_HOLD_HOURS and STALE_PNL_RANGE[0] <= pnl <= STALE_PNL_RANGE[1]:
+                            reason = f"STALE: {pnl:+.1f}% after {held_hours:.0f}h — cutting dead money"
+                            if not args.live:
+                                tracker.exit(sym, current_price, reason)
+                            else:
+                                _close_live_position(base_url, api_key, api_secret, sym,
+                                                     live_pos_check, args.leverage,
+                                                     entry_price, entry_unix,
+                                                     current_price, pnl, reason, live_tracker)
+                            continue
+
+                        held_sec = time.time() - entry_unix
                         if held_sec < MIN_HOLD_SECONDS:
                             continue
                         exit_info = check_exit_signals(base_url, sym, pos["entry_price"],
