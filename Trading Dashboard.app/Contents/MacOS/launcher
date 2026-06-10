@@ -12,11 +12,16 @@ CANDIDATES=(
     /opt/homebrew/bin/python3
     /usr/local/bin/python3
     /usr/bin/python3
+    "$HOME/.pyenv/shims/python3"
+    "$HOME/miniforge3/bin/python3"
+    "$HOME/miniconda3/bin/python3"
+    "$HOME/anaconda3/bin/python3"
+    /opt/homebrew/opt/python3/bin/python3
 )
 
 PY=""
 for p in "${CANDIDATES[@]}"; do
-    [ -x "$p" ] || continue
+    [ -n "$p" ] && [ -x "$p" ] || continue
     if "$p" -c "import fastapi, uvicorn" >/dev/null 2>&1; then
         PY="$p"
         break
@@ -24,10 +29,20 @@ for p in "${CANDIDATES[@]}"; do
 done
 
 if [ -z "$PY" ]; then
-    osascript -e 'display dialog "Python with fastapi/uvicorn not found.\n\nOpen Terminal and run:\n\npip3 install fastapi uvicorn" buttons {"OK"} default button "OK" with title "Trading Dashboard"' >/dev/null 2>&1
+    # Show which pythons we found (but lacked deps) to help debugging
+    FOUND=""
+    for p in "${CANDIDATES[@]}"; do
+        [ -n "$p" ] && [ -x "$p" ] && FOUND="$FOUND\n  $p"
+    done
+    MSG="No Python with fastapi+uvicorn found."
+    [ -n "$FOUND" ] && MSG="$MSG\n\nPythons found (missing deps):$FOUND"
+    MSG="$MSG\n\nOpen Terminal and run:\n  pip3 install fastapi uvicorn"
+    osascript -e "display dialog \"$MSG\" buttons {\"OK\"} default button \"OK\" with title \"Trading Dashboard\"" >/dev/null 2>&1
     exit 1
 fi
 
 cd "$REPO" || exit 1
 echo "=== Launched $(date) with $PY ===" >> "$LOG"
-exec "$PY" run_dashboard.py >> "$LOG" 2>&1
+
+# Start server in background so macOS sees the launcher exit cleanly
+"$PY" run_dashboard.py >> "$LOG" 2>&1 &
