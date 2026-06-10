@@ -75,16 +75,6 @@ DEFAULT_LEVERAGE = 5            # 5x leverage
 RE_ENTRY_COOLDOWN_HOURS = 6     # allow re-entry on same symbol after this cooldown
 MIN_HOLD_SECONDS = 1800         # 30 min minimum hold before signal-based exits (hard exit still active)
 STOP_LOSS_PCT = -15             # hard stop loss — same threshold for paper and live
-
-# Pyramiding config: add to winners at these profit thresholds
-PYRAMID_LEVELS = [
-    (10, 0.50),   # at +10% profit, add 50% of original size
-    (20, 0.50),   # at +20%, add another 50%
-    (35, 0.50),   # at +35%, add another 50%
-]
-PYRAMID_MAX_ADDS = len(PYRAMID_LEVELS)
-PYRAMID_MIN_HOLD_BEFORE_ADD = 1800  # must hold 30 min before first pyramid add
-
 # Score-based sizing tiers: (min_score, multiplier_of_base)
 SCORE_SIZE_TIERS = [
     (90, 3.0),   # Exceptional → 3x base
@@ -373,70 +363,19 @@ class MomentumPaperTrader:
             "entry_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             "entry_unix": time.time(),
             "score": score,
-            "pyramid_adds": 0,
-            "pyramid_history": [],
         }
         print(f"  [PAPER] LONG {symbol} @ {price:,.6g} | "
               f"Score {score:.0f} | ${size:.0f} x{self.leverage}")
         self.save_state()
-
-    def pyramid_add(self, symbol, current_price):
-        """Add to a winning position if it hits the next pyramid threshold."""
-        if symbol not in self.positions:
-            return False
-        pos = self.positions[symbol]
-        adds = pos.get("pyramid_adds", 0)
-        if adds >= PYRAMID_MAX_ADDS:
-            return False
-        held = time.time() - pos.get("entry_unix", 0)
-        if held < PYRAMID_MIN_HOLD_BEFORE_ADD:
-            return False
-        entry = pos["entry_price"]
-        pnl_pct = (current_price - entry) / entry * 100
-        threshold, size_mult = PYRAMID_LEVELS[adds]
-        if pnl_pct < threshold:
-            return False
-        original_size = pos["trade_size"]
-        add_size = original_size * size_mult
-        add_qty = add_size / current_price
-        old_total_size = original_size + sum(h["size"] for h in pos.get("pyramid_history", []))
-        old_total_qty = pos["qty"]
-        new_total_qty = old_total_qty + add_qty
-        new_avg_entry = (old_total_qty * entry + add_qty * current_price) / new_total_qty
-        pos["entry_price"] = new_avg_entry
-        pos["qty"] = new_total_qty
-        pos["pyramid_adds"] = adds + 1
-        history = pos.get("pyramid_history", [])
-        history.append({
-            "price": current_price,
-            "size": add_size,
-            "qty": add_qty,
-            "pnl_at_add": round(pnl_pct, 2),
-            "time": time.time(),
-        })
-        pos["pyramid_history"] = history
-        new_total_size = old_total_size + add_size
-        print(f"  [PYRAMID #{adds+1}] {symbol} @ {current_price:,.6g} | "
-              f"+${add_size:.0f} ({size_mult:.0f}x original) | "
-              f"Avg entry: {new_avg_entry:,.6g} | Total: ${new_total_size:.0f}")
-        self.save_state()
-        return True
-
-    def _total_size(self, pos):
-        """Total position size including pyramid adds."""
-        base = pos.get("trade_size", self.amount)
-        pyramid = sum(h["size"] for h in pos.get("pyramid_history", []))
-        return base + pyramid
 
     def exit(self, symbol, current_price, reason):
         if symbol not in self.positions:
             return
         pos = self.positions.pop(symbol)
         entry = pos["entry_price"]
-        total_size = self._total_size(pos)
+        size = pos.get("trade_size", self.amount)
         pnl_pct = (current_price - entry) / entry * 100
-        pnl_usd = pnl_pct / 100 * total_size
-        adds = pos.get("pyramid_adds", 0)
+        pnl_usd = pnl_pct / 100 * size
         held = self._format_elapsed(time.time() - pos.get("entry_unix", time.time()))
         self.closed_trades.append({
             **pos,
@@ -447,9 +386,8 @@ class MomentumPaperTrader:
             "reason": reason,
             "symbol": symbol,
         })
-        pyramid_label = f" ({adds} adds)" if adds > 0 else ""
         print(f"  [PAPER EXIT] {symbol} @ {current_price:,.6g} | "
-              f"P&L: {pnl_pct:+.1f}% (${pnl_usd:+,.2f}) | Size: ${total_size:.0f}{pyramid_label} | Held: {held} | {reason}")
+              f"P&L: {pnl_pct:+.1f}% (${pnl_usd:+,.2f}) | Size: ${size:.0f} | Held: {held} | {reason}")
         self.save_state()
         shared_state.append_trade("accumulation", {
             "symbol": symbol,
@@ -457,11 +395,10 @@ class MomentumPaperTrader:
             "exit_price": current_price,
             "pnl_pct": round(pnl_pct, 2),
             "pnl_usd": round(pnl_usd, 2),
-            "size_usdt": total_size,
+            "size_usdt": size,
             "leverage": self.leverage,
             "reason": reason,
             "entry_time": pos.get("entry_unix", 0),
-            "pyramid_adds": adds,
             "score": pos.get("score", 0),
         })
 
@@ -507,23 +444,22 @@ class MomentumPaperTrader:
         print(f"\n  {'─'*130}")
         print(f"  PAPER POSITIONS ({len(self.positions)} open)")
         print(f"  {'─'*130}")
-        print(f"  {'Symbol':<14} {'Score':>6} {'Size':>8} {'Adds':>4} {'Entry':>12} {'Current':>12}"
+        print(f"  {'Symbol':<14} {'Score':>6} {'Size':>8} {'Entry':>12} {'Current':>12}"
               f"  {'P&L%':>8}  {'P&L$':>10}  {'Entered':<22}  {'Held':>6}")
-        print(f"  {'─'*130}")
+        print(f"  {'─'*120}")
 
         total_pnl = 0
         now = time.time()
         for symbol, pos in sorted(self.positions.items()):
             price = pos.get("current_price", pos["entry_price"])
             entry = pos["entry_price"]
-            total_size = self._total_size(pos)
+            size = pos.get("trade_size", self.amount)
             pnl_pct = (price - entry) / entry * 100
-            pnl_usd = pnl_pct / 100 * total_size
+            pnl_usd = pnl_pct / 100 * size
             total_pnl += pnl_usd
             held = self._format_elapsed(now - pos.get("entry_unix", now))
-            adds = pos.get("pyramid_adds", 0)
 
-            print(f"  {symbol:<14} {pos['score']:>6.0f} ${total_size:>6.0f} {adds:>4} {entry:>12,.6g} {price:>12,.6g}"
+            print(f"  {symbol:<14} {pos['score']:>6.0f} ${size:>6.0f} {entry:>12,.6g} {price:>12,.6g}"
                   f"  {pnl_pct:>+7.1f}%  ${pnl_usd:>+9,.2f}  {pos['entry_time']:<22}  {held:>6}")
 
         print(f"  {'─'*130}")
@@ -535,7 +471,7 @@ class MomentumPaperTrader:
         for pos in self.positions.values():
             price = pos.get("current_price", pos["entry_price"])
             pnl_pct = (price - pos["entry_price"]) / pos["entry_price"] * 100
-            unrealized += pnl_pct / 100 * self._total_size(pos)
+            unrealized += pnl_pct / 100 * pos.get("trade_size", self.amount)
 
         elapsed = time.time() - self.start_time
         mins = int(elapsed / 60)
@@ -593,7 +529,7 @@ class MomentumPaperTrader:
                 price = pos.get("current_price", pos["entry_price"])
                 entry = pos["entry_price"]
                 pnl_pct = (price - entry) / entry * 100
-                pnl_usd = pnl_pct / 100 * self._total_size(pos)
+                pnl_usd = pnl_pct / 100 * pos.get("trade_size", self.amount)
                 total_pnl += pnl_usd
                 if pnl_usd >= 0:
                     wins += 1
@@ -617,50 +553,6 @@ class MomentumPaperTrader:
         print(f"\n    TOTAL P&L:     ${total_pnl:+,.2f}")
         print(f"{'='*120}\n")
 
-
-# ──────────────────────────────────────────────
-# Live P&L display
-# ──────────────────────────────────────────────
-
-def display_live_pnl(base_url, api_key, api_secret):
-    """Show real position P&L summary for live mode."""
-    positions = get_open_positions(base_url, api_key, api_secret)
-    if not positions:
-        print(f"\n  No open positions.")
-        return
-
-    total_pnl = 0.0
-    print(f"\n  {'='*90}")
-    print(f"  LIVE POSITIONS — {len(positions)} open")
-    print(f"  {'─'*90}")
-    print(f"  {'Symbol':<14} {'Side':<6} {'Lev':>4} {'Entry':>12} {'Mark':>12}"
-          f"  {'P&L%':>8}  {'P&L$':>10}  {'Value':>10}")
-    print(f"  {'─'*90}")
-
-    for pos in positions:
-        symbol = pos.get("symbol", "")
-        side = pos.get("side", "")
-        entry_price = float(pos.get("avgPrice", "0") or "0")
-        mark_price = float(pos.get("markPrice", "0") or "0")
-        leverage = pos.get("leverage", "?")
-        unrealised_pnl = float(pos.get("unrealisedPnl", "0") or "0")
-        position_value = float(pos.get("positionValue", "0") or "0")
-
-        if entry_price <= 0 or mark_price <= 0:
-            continue
-
-        total_pnl += unrealised_pnl
-        if side == "Buy":
-            profit_pct = (mark_price - entry_price) / entry_price * 100
-        else:
-            profit_pct = (entry_price - mark_price) / entry_price * 100
-
-        print(f"  {symbol:<14} {side:<6} {leverage:>4}x {entry_price:>12,.6g} {mark_price:>12,.6g}"
-              f"  {profit_pct:>+7.1f}%  ${unrealised_pnl:>+9,.2f}  ${position_value:>9,.2f}")
-
-    print(f"  {'─'*90}")
-    print(f"  {'TOTAL P&L:':>60}  ${total_pnl:>+9,.2f}")
-    print(f"  {'='*90}")
 
 
 def _close_live_position(base_url, api_key, api_secret, sym, live_positions,
@@ -687,7 +579,7 @@ def _close_live_position(base_url, api_key, api_secret, sym, live_positions,
             total_size = pos_value
             score = 0
             if live_tracker and sym in live_tracker.positions:
-                total_size = live_tracker._total_size(live_tracker.positions[sym])
+                total_size = live_tracker.positions[sym].get("trade_size", pos_value)
                 score = live_tracker.positions[sym].get("score", 0)
                 live_tracker.positions.pop(sym, None)
                 live_tracker.save_state()
@@ -778,7 +670,7 @@ def run_auto_trader(args):
     init_trade_log()
 
     paper = None if args.live else MomentumPaperTrader(args.amount, args.leverage)
-    # Live tracker mirrors paper interface for score/pyramid/dashboard publishing
+    # Live tracker mirrors paper interface for score/dashboard publishing
     live_tracker = MomentumPaperTrader(args.amount, args.leverage) if args.live else None
     tracker = paper or live_tracker
     if tracker is not None:
@@ -807,7 +699,7 @@ def run_auto_trader(args):
     print(f"  Leverage:        {args.leverage}x")
     print(f"  Max exposure:    ${max_exposure:,.0f} notional ({args.max_exposure_mult}x account)")
     print(f"  Strategy:        Pool D accumulation → exit on graduation")
-    print(f"  Entry:           Pool D only (score 25+ AND accum signal 20+)")
+    print(f"  Entry:           Pool D only (score 40+ AND accum signal 20+)")
     print(f"  Watch:           Pool A/B/C coins shown at score {args.min_score}+")
     print(f"  Exit:            Pool A/B graduation, funding flip, OI drop, 200%+ extension")
     print(f"  Scan interval:   every {args.interval} minutes")
@@ -883,11 +775,6 @@ def run_auto_trader(args):
                                                  entry_unix, current_price, pnl, reason, live_tracker)
                         continue
 
-                # Pyramid check — add to winners during scan cycle
-                if tracker and sym in tracker.positions and current_price > 0:
-                    tracker.pyramid_add(sym, current_price)
-                    entry_price = tracker.positions[sym]["entry_price"]
-
                 graduated_since = graduation_tracker.get(sym)
                 exit_info = check_exit_signals(base_url, sym, entry_price, graduated_since)
                 pool_now = exit_info.get("pool", "?")
@@ -940,9 +827,6 @@ def run_auto_trader(args):
         if not results:
             print(f"\n  No coins above score {args.min_score}. Waiting...\n")
         else:
-            # FHE backtest: 25 catches it May 1 (day before pump, +134%).
-            # Lower thresholds catch earlier but lock capital on dead days.
-            # Scam coins pump and dump fast — late entry is better than early.
             pool_d_entry_threshold = 40
             pool_d_results = [r for r in results if r.get("pool") == "D"
                               and r["momentum_score"] >= pool_d_entry_threshold
@@ -996,6 +880,9 @@ def run_auto_trader(args):
                         print(f"     Crime risk:    {crime['detail']} (score {crime['crime_score']})")
 
                     # Safety checks
+                    if tracker and symbol in tracker.positions:
+                        print(f"     SKIP: already holding {symbol}")
+                        continue
                     can_trade, reason = session.can_trade(symbol)
                     if not can_trade:
                         print(f"     SKIP: {reason}")
@@ -1096,11 +983,11 @@ def run_auto_trader(args):
                  "entry_price": p["entry_price"],
                  "current_price": p.get("current_price", p["entry_price"]),
                  "pnl_pct": round((p.get("current_price", p["entry_price"]) - p["entry_price"]) / p["entry_price"] * 100, 2),
-                 "size_usdt": tracker._total_size(p),
+                 "size_usdt": p.get("trade_size", tracker.amount),
                  "leverage": tracker.leverage,
                  "entry_time": p.get("entry_unix", 0),
                  "score": p.get("score", 0),
-                 "pyramid_adds": p.get("pyramid_adds", 0)}
+                 }
                 for sym, p in tracker.positions.items()
             ])
 
@@ -1128,11 +1015,11 @@ def run_auto_trader(args):
                          "entry_price": p["entry_price"],
                          "current_price": p.get("current_price", p["entry_price"]),
                          "pnl_pct": round((p.get("current_price", p["entry_price"]) - p["entry_price"]) / p["entry_price"] * 100, 2),
-                         "size_usdt": tracker._total_size(p),
+                         "size_usdt": p.get("trade_size", tracker.amount),
                          "leverage": tracker.leverage,
                          "entry_time": p.get("entry_unix", 0),
                          "score": p.get("score", 0),
-                         "pyramid_adds": p.get("pyramid_adds", 0)}
+                         }
                         for sym, p in tracker.positions.items()
                     ])
                     # Fetch live positions for exit execution
@@ -1151,7 +1038,6 @@ def run_auto_trader(args):
                                                      pos["entry_price"], pos.get("entry_unix", 0),
                                                      current_price, pnl, reason, live_tracker)
                             continue
-                        tracker.pyramid_add(sym, current_price)
                         held_sec = time.time() - pos.get("entry_unix", 0)
                         if held_sec < MIN_HOLD_SECONDS:
                             continue

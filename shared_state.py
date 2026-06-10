@@ -13,8 +13,8 @@ RUNS_FILE = DATA_DIR / "runs.json"
 BOT_STATE_FILES = {
     "auto_trader": Path(__file__).parent / "data" / "auto_trader_state.json",
     "accumulation": Path(__file__).parent / "data" / "auto_trader_state.json",
-    "sfp_scanner": Path(__file__).parent / "sfp_position_state.json",
-    "sfp": Path(__file__).parent / "sfp_position_state.json",
+    "sfp_scanner": Path(__file__).parent / "data" / "sfp_state.json",
+    "sfp": Path(__file__).parent / "data" / "sfp_state.json",
 }
 
 def _ensure_dir():

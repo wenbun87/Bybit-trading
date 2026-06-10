@@ -53,7 +53,7 @@ WEIGHTS = {
     "streak":         0.15,
 }
 
-# Trailing stop tiers (must match position_manager.py)
+# Trailing stop tiers
 TRAILING_TIERS = [
     (0,    0),
     (10,   8.0),

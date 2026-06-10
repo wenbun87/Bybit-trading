@@ -1,2 +1,9 @@
 __pycache__/
 *.pyc
+data/
+*.csv
+*_state.json
+momentum_scan*.json
+sfp_scan*.json
+top_gainers_data.json
+.skill-update-tmp/

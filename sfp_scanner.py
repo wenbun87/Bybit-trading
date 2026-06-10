@@ -113,7 +113,6 @@ TRAILING_TIERS = [
 
 SFP_TRADE_LOG = "sfp_trade_log.csv"
 SFP_EXIT_LOG = "sfp_exit_log.csv"
-SFP_STATE_FILE = "sfp_position_state.json"
 
 # Paper trading defaults
 PAPER_AMOUNT_USDT = 500
