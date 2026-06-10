@@ -79,14 +79,17 @@ STALE_HOLD_HOURS = 72           # cut positions going nowhere after 3 days
 STALE_PNL_RANGE = (-10, 5)      # only cut if P&L is between -10% and +5% (dead money zone)
 
 # Lottery mode: tiny positions on likely cabal/scam coins, no stop, let it ride
-LOTTERY_CRIME_THRESHOLD = 40    # crime_pump score above this → lottery sizing
-LOTTERY_SIZE_USDT = 150         # $150 notional per lottery ticket
+# Crime score at entry = lifecycle stage indicator.
+# Low (<30) = early, cabal still accumulating → full size.
+# 30-60 = pump already starting, entering late → half size.
+# 60+ = hard blocked by scanner (you'd be the exit liquidity).
+CRIME_HALF_SIZE_THRESHOLD = 30
 
-# Lottery exit strategy: scale out + let runner ride
-LOTTERY_SCALEOUT_PCT = 25       # take 50% off at +25%
-LOTTERY_SCALEOUT_RATIO = 0.5    # sell this fraction at first target
-LOTTERY_OI_DIVERGENCE_PCT = 20  # exit runner if OI drops 20%+ from peak while price near highs
-LOTTERY_RATCHET_TIERS = [       # (pnl_threshold, lock_floor) — safety net for runner
+# Exit strategy (all positions): scale out at first target, let runner ride
+SCALEOUT_PCT = 25               # take 50% off at +25%
+SCALEOUT_RATIO = 0.5            # sell this fraction at first target
+OI_DIVERGENCE_PCT = 20          # exit runner if OI drops 20%+ from peak while price near highs
+RATCHET_TIERS = [               # (pnl_threshold, lock_floor) — safety net for runner
     (200, 80),                  # hit +200% → floor at +80%
     (100, 30),                  # hit +100% → floor at +30%
     (50,   0),                  # hit +50%  → floor at breakeven
@@ -343,7 +346,7 @@ def check_oi_divergence(base_url: str, symbol: str, peak_oi: float,
         return None
     oi_drop_pct = (peak_oi - current_oi) / peak_oi * 100
     price_near_highs = current_pnl >= peak_pnl * 0.70 if peak_pnl > 0 else False
-    if oi_drop_pct >= LOTTERY_OI_DIVERGENCE_PCT and price_near_highs:
+    if oi_drop_pct >= OI_DIVERGENCE_PCT and price_near_highs:
         return (f"OI DIVERGENCE: OI down {oi_drop_pct:.0f}% from peak "
                 f"while price still near highs ({current_pnl:+.0f}%)")
     return None
@@ -443,7 +446,7 @@ class MomentumPaperTrader:
             print(f"  [State] WARNING: could not load state from {STATE_FILE}: {e}")
             return {}
 
-    def enter(self, symbol, price, score, signals, trade_size=None, lottery=False):
+    def enter(self, symbol, price, score, signals, trade_size=None):
         if symbol in self.positions:
             return
         size = trade_size if trade_size is not None else self.amount
@@ -455,7 +458,6 @@ class MomentumPaperTrader:
             "entry_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             "entry_unix": time.time(),
             "score": score,
-            "lottery": lottery,
             "peak_pnl_pct": 0.0,
             "peak_oi": 0.0,
             "scaled_out": False,
@@ -499,7 +501,7 @@ class MomentumPaperTrader:
             "score": pos.get("score", 0),
         })
 
-    def scale_out(self, symbol, current_price, ratio=LOTTERY_SCALEOUT_RATIO):
+    def scale_out(self, symbol, current_price, ratio=SCALEOUT_RATIO):
         """Close a fraction of a position (partial take profit)."""
         if symbol not in self.positions:
             return
@@ -747,6 +749,54 @@ def _close_live_position(base_url, api_key, api_secret, sym, live_positions,
         break
 
 
+def _partial_close_live(base_url, api_key, api_secret, sym, live_positions,
+                        ratio):
+    """Close a fraction of a live position (reduce-only market sell).
+    Trade recording is handled by the caller via tracker.scale_out()."""
+    for p in live_positions:
+        if p.get("symbol") != sym:
+            continue
+        full_qty = float(p.get("size", 0))
+        if full_qty <= 0:
+            break
+        pos_idx = int(p.get("positionIdx", 0))
+
+        instrument = get_instrument_info(base_url, sym)
+        if instrument:
+            lot_filter = instrument.get("lotSizeFilter", {})
+            qty_step = float(lot_filter.get("qtyStep", "0.001"))
+            min_qty = float(lot_filter.get("minOrderQty", "0.001"))
+        else:
+            qty_step = 0.001
+            min_qty = 0.001
+
+        raw_qty = full_qty * ratio
+        steps = int(raw_qty / qty_step)
+        partial_qty = steps * qty_step
+        if partial_qty < min_qty:
+            print(f"    Partial close skipped: qty {partial_qty} below minimum {min_qty}")
+            break
+        if qty_step >= 1:
+            qty_str = str(int(partial_qty))
+        else:
+            decimals = len(str(qty_step).rstrip("0").split(".")[-1])
+            qty_str = f"{partial_qty:.{decimals}f}"
+
+        print(f"    Scaling out {qty_str} of {full_qty} {sym}...", end=" ")
+        result = api_request(base_url, "POST", "/v5/order/create",
+                             api_key, api_secret, {
+                                 "category": "linear", "symbol": sym,
+                                 "side": "Sell", "orderType": "Market",
+                                 "qty": qty_str, "positionIdx": pos_idx,
+                                 "reduceOnly": True,
+                             })
+        if result.get("retCode") == 0:
+            print("DONE")
+        else:
+            print(f"FAILED: {result.get('retMsg')}")
+        break
+
+
 # ──────────────────────────────────────────────
 # Session state
 # ──────────────────────────────────────────────
@@ -846,11 +896,12 @@ def run_auto_trader(args):
     print(f"  Strategy:        Pool D accumulation → exit on graduation")
     print(f"  Entry:           Pool D only (score 40+ AND accum signal 20+)")
     print(f"  Watch:           Pool A/B/C coins shown at score {args.min_score}+")
-    print(f"  Stop loss:       {STOP_LOSS_PCT}% (lottery: none)")
+    print(f"  Stop loss:       {STOP_LOSS_PCT}%")
     print(f"  Stale exit:      Cut after {STALE_HOLD_HOURS}h if P&L in [{STALE_PNL_RANGE[0]}%, {STALE_PNL_RANGE[1]}%]")
-    print(f"  Lottery mode:    Crime score {LOTTERY_CRIME_THRESHOLD}+ → ${LOTTERY_SIZE_USDT} ticket, no stop")
-    print(f"  Lottery exit:    Scale out 50% at +{LOTTERY_SCALEOUT_PCT}%, runner rides with OI div / structure break / ratchet")
-    print(f"  Exit:            Pool A/B graduation, funding flip, OI drop, 200%+ extension")
+    print(f"  Late entry:      Crime score {CRIME_HALF_SIZE_THRESHOLD}+ → half size (pump already started)")
+    print(f"  Exit strategy:   Scale out {SCALEOUT_RATIO*100:.0f}% at +{SCALEOUT_PCT}%, runner rides")
+    print(f"  Runner exits:    OI divergence, 1h structure break, ratchet floors")
+    print(f"  Pre-target exit: Pool A/B graduation, funding flip, OI drop, crime re-flag")
     print(f"  Scan interval:   every {args.interval} minutes")
     print(f"  Max per cycle:   {MAX_TRADES_PER_CYCLE} trades")
     print(f"  Max per day:     {MAX_TRADES_PER_DAY} trades")
@@ -912,14 +963,13 @@ def run_auto_trader(args):
 
                 # Use fresh tracker price (just updated above)
                 pos_data = tracker.positions.get(sym, {}) if tracker else {}
-                is_lottery = pos_data.get("lottery", False)
                 current_price = pos_data.get("current_price", entry_price)
                 if current_price > 0:
                     pnl = (current_price - entry_price) / entry_price * 100
                     held_hours = (time.time() - entry_unix) / 3600
 
-                    # Hard stop loss (skip for lottery positions — sizing IS the risk management)
-                    if not is_lottery and pnl <= STOP_LOSS_PCT:
+                    # Hard stop loss
+                    if pnl <= STOP_LOSS_PCT:
                         reason = f"HARD EXIT: P&L {pnl:.1f}% breached {STOP_LOSS_PCT}% stop loss"
                         if not args.live:
                             tracker.exit(sym, current_price, reason)
@@ -940,21 +990,19 @@ def run_auto_trader(args):
                                                  entry_unix, current_price, pnl, reason, live_tracker)
                         continue
 
-                # ── Lottery position management: scale-out + runner exits ──
-                if is_lottery and tracker:
+                # ── Scale-out + runner exits (all positions) ──
+                if tracker and pos_data:
                     # Update peak OI tracking
                     cur_oi = get_current_oi(base_url, sym)
                     if cur_oi > pos_data.get("peak_oi", 0):
                         pos_data["peak_oi"] = cur_oi
 
                     # Scale out: sell 50% at +25%
-                    if pnl >= LOTTERY_SCALEOUT_PCT and not pos_data.get("scaled_out"):
-                        if not args.live:
-                            tracker.scale_out(sym, current_price)
-                        else:
-                            # Live partial close handled below
-                            tracker.scale_out(sym, current_price)
-                            # TODO: place partial sell order for live
+                    if pnl >= SCALEOUT_PCT and not pos_data.get("scaled_out"):
+                        if args.live:
+                            _partial_close_live(base_url, api_key, api_secret, sym,
+                                                live_positions, SCALEOUT_RATIO)
+                        tracker.scale_out(sym, current_price)
                         continue
 
                     # Runner exits (only after scaled out)
@@ -984,7 +1032,7 @@ def run_auto_trader(args):
                             continue
 
                         # Ratchet floors: safety net for runners
-                        for threshold, floor in LOTTERY_RATCHET_TIERS:
+                        for threshold, floor in RATCHET_TIERS:
                             if pos_data.get("peak_pnl_pct", 0) >= threshold and pnl <= floor:
                                 reason = (f"RATCHET: peak was +{pos_data['peak_pnl_pct']:.0f}%, "
                                           f"now {pnl:+.1f}% — floor +{floor}% triggered")
@@ -997,7 +1045,7 @@ def run_auto_trader(args):
                                 break
                         else:
                             peak = pos_data.get("peak_pnl_pct", 0)
-                            print(f"  RIDE:  {sym} [LOTTERY RUNNER] {pnl:+.1f}% (peak {peak:+.0f}%) — letting it ride")
+                            print(f"  RIDE:  {sym} [RUNNER] {pnl:+.1f}% (peak {peak:+.0f}%) — letting it ride")
                         continue
 
                 graduated_since = graduation_tracker.get(sym)
@@ -1113,23 +1161,18 @@ def run_auto_trader(args):
                         print(f"     SKIP: {reason}")
                         continue
 
-                    # Lottery detection: high crime_pump score → tiny position, no stop
+                    # Score-based sizing, halved if entering late (pump already started)
                     crime_score = signals.get("crime_pump", {}).get("crime_score", 0)
-                    is_lottery = crime_score >= LOTTERY_CRIME_THRESHOLD
-
-                    # Score-based sizing (or lottery sizing)
-                    if is_lottery:
-                        trade_size = min(LOTTERY_SIZE_USDT, max(0, max_exposure - session.total_exposure))
-                        print(f"     LOTTERY: crime score {crime_score:.0f} → ${trade_size:.0f} ticket, no stop loss")
-                    else:
-                        trade_size = compute_trade_size(
-                            score, args.account_balance, max_exposure,
-                            session.total_exposure, args.leverage)
+                    trade_size = compute_trade_size(
+                        score, args.account_balance, max_exposure,
+                        session.total_exposure, args.leverage)
+                    if crime_score >= CRIME_HALF_SIZE_THRESHOLD:
+                        trade_size = round(trade_size / 2, 2)
+                        print(f"     LATE ENTRY: crime score {crime_score:.0f} → half size")
                     if trade_size < 5:
                         print(f"     SKIP: trade size too small (${trade_size:.0f}, exposure cap reached?)")
                         continue
-                    if not is_lottery:
-                        print(f"     SIZE: ${trade_size:.0f} (score {score:.0f} → {trade_size/base_size:.1f}x base)")
+                    print(f"     SIZE: ${trade_size:.0f} (score {score:.0f} → {trade_size/base_size:.1f}x base)")
 
                     # Get instrument info for qty precision
                     instrument = get_instrument_info(base_url, symbol)
@@ -1145,7 +1188,7 @@ def run_auto_trader(args):
                     est_value = float(qty) * price
                     print(f"     Order: BUY {qty} {symbol} (~${est_value:,.2f}) @ {args.leverage}x leverage")
 
-                    sl_price = None if is_lottery else price * (1 + STOP_LOSS_PCT / 100)
+                    sl_price = price * (1 + STOP_LOSS_PCT / 100)
 
                     if not args.live:
                         # Paper: log and track
@@ -1153,7 +1196,7 @@ def run_auto_trader(args):
                         log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                                   score, signals, "dry-run", "N/A", "dry-run")
                         tracker.enter(symbol, price, score, signals,
-                                      trade_size=trade_size, lottery=is_lottery)
+                                      trade_size=trade_size)
                         session.record_trade(symbol, est_value)
                         trades_this_cycle += 1
                     else:
@@ -1174,7 +1217,7 @@ def run_auto_trader(args):
                             log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                                       score, signals, "filled", order_id, "live")
                             tracker.enter(symbol, price, score, signals,
-                                          trade_size=trade_size, lottery=is_lottery)
+                                          trade_size=trade_size)
                             session.record_trade(symbol, est_value)
                             trades_this_cycle += 1
                         elif ret_code == 10001 and "position idx" in result.get("retMsg", "").lower():
@@ -1196,7 +1239,7 @@ def run_auto_trader(args):
                                 log_trade(symbol, "Buy", qty, price, est_value, args.leverage,
                                           score, signals, "filled", oid, "live")
                                 tracker.enter(symbol, price, score, signals,
-                                              trade_size=trade_size, lottery=is_lottery)
+                                              trade_size=trade_size)
                                 session.record_trade(symbol, est_value)
                                 trades_this_cycle += 1
                             else:
@@ -1264,15 +1307,14 @@ def run_auto_trader(args):
                     live_pos_check = get_open_positions(base_url, api_key, api_secret) if args.live else []
                     for sym in list(tracker.positions):
                         pos = tracker.positions[sym]
-                        is_lottery = pos.get("lottery", False)
                         current_price = pos.get("current_price", pos["entry_price"])
                         entry_price = pos["entry_price"]
                         entry_unix = pos.get("entry_unix", 0)
                         pnl = (current_price - entry_price) / entry_price * 100
                         held_hours = (time.time() - entry_unix) / 3600
 
-                        # Hard stop (skip for lottery)
-                        if not is_lottery and pnl <= STOP_LOSS_PCT:
+                        # Hard stop
+                        if pnl <= STOP_LOSS_PCT:
                             reason = f"HARD EXIT: P&L {pnl:.1f}% breached {STOP_LOSS_PCT}% stop loss"
                             if not args.live:
                                 tracker.exit(sym, current_price, reason)
@@ -1295,56 +1337,55 @@ def run_auto_trader(args):
                                                      current_price, pnl, reason, live_tracker)
                             continue
 
-                        # Lottery runner management (same logic as main cycle)
-                        if is_lottery:
-                            cur_oi = get_current_oi(base_url, sym)
-                            if cur_oi > pos.get("peak_oi", 0):
-                                pos["peak_oi"] = cur_oi
+                        # Scale-out + runner management (same logic as main cycle)
+                        cur_oi = get_current_oi(base_url, sym)
+                        if cur_oi > pos.get("peak_oi", 0):
+                            pos["peak_oi"] = cur_oi
 
-                            if pnl >= LOTTERY_SCALEOUT_PCT and not pos.get("scaled_out"):
+                        if pnl >= SCALEOUT_PCT and not pos.get("scaled_out"):
+                            if args.live:
+                                _partial_close_live(base_url, api_key, api_secret, sym,
+                                                    live_pos_check, SCALEOUT_RATIO)
+                            tracker.scale_out(sym, current_price)
+                            continue
+
+                        if pos.get("scaled_out"):
+                            oi_reason = check_oi_divergence(
+                                base_url, sym, pos.get("peak_oi", 0),
+                                pnl, pos.get("peak_pnl_pct", 0))
+                            if oi_reason:
                                 if not args.live:
-                                    tracker.scale_out(sym, current_price)
+                                    tracker.exit(sym, current_price, oi_reason)
                                 else:
-                                    tracker.scale_out(sym, current_price)
+                                    _close_live_position(base_url, api_key, api_secret, sym,
+                                                         live_pos_check, args.leverage,
+                                                         entry_price, entry_unix,
+                                                         current_price, pnl, oi_reason, live_tracker)
                                 continue
 
-                            if pos.get("scaled_out"):
-                                oi_reason = check_oi_divergence(
-                                    base_url, sym, pos.get("peak_oi", 0),
-                                    pnl, pos.get("peak_pnl_pct", 0))
-                                if oi_reason:
+                            struct_reason = check_structure_break(base_url, sym)
+                            if struct_reason:
+                                if not args.live:
+                                    tracker.exit(sym, current_price, struct_reason)
+                                else:
+                                    _close_live_position(base_url, api_key, api_secret, sym,
+                                                         live_pos_check, args.leverage,
+                                                         entry_price, entry_unix,
+                                                         current_price, pnl, struct_reason, live_tracker)
+                                continue
+
+                            for threshold, floor in RATCHET_TIERS:
+                                if pos.get("peak_pnl_pct", 0) >= threshold and pnl <= floor:
+                                    reason = (f"RATCHET: peak was +{pos['peak_pnl_pct']:.0f}%, "
+                                              f"now {pnl:+.1f}% — floor +{floor}% triggered")
                                     if not args.live:
-                                        tracker.exit(sym, current_price, oi_reason)
+                                        tracker.exit(sym, current_price, reason)
                                     else:
                                         _close_live_position(base_url, api_key, api_secret, sym,
                                                              live_pos_check, args.leverage,
                                                              entry_price, entry_unix,
-                                                             current_price, pnl, oi_reason, live_tracker)
-                                    continue
-
-                                struct_reason = check_structure_break(base_url, sym)
-                                if struct_reason:
-                                    if not args.live:
-                                        tracker.exit(sym, current_price, struct_reason)
-                                    else:
-                                        _close_live_position(base_url, api_key, api_secret, sym,
-                                                             live_pos_check, args.leverage,
-                                                             entry_price, entry_unix,
-                                                             current_price, pnl, struct_reason, live_tracker)
-                                    continue
-
-                                for threshold, floor in LOTTERY_RATCHET_TIERS:
-                                    if pos.get("peak_pnl_pct", 0) >= threshold and pnl <= floor:
-                                        reason = (f"RATCHET: peak was +{pos['peak_pnl_pct']:.0f}%, "
-                                                  f"now {pnl:+.1f}% — floor +{floor}% triggered")
-                                        if not args.live:
-                                            tracker.exit(sym, current_price, reason)
-                                        else:
-                                            _close_live_position(base_url, api_key, api_secret, sym,
-                                                                 live_pos_check, args.leverage,
-                                                                 entry_price, entry_unix,
-                                                                 current_price, pnl, reason, live_tracker)
-                                        break
+                                                             current_price, pnl, reason, live_tracker)
+                                    break
                             continue
 
                         held_sec = time.time() - entry_unix
