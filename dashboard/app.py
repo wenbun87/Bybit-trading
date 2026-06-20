@@ -30,6 +30,15 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+@app.middleware("http")
+async def no_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api") or request.url.path == "/":
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return (TEMPLATES_DIR / "index.html").read_text()
