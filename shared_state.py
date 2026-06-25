@@ -13,8 +13,6 @@ RUNS_FILE = DATA_DIR / "runs.json"
 BOT_STATE_FILES = {
     "auto_trader": Path(__file__).parent / "data" / "auto_trader_state.json",
     "accumulation": Path(__file__).parent / "data" / "auto_trader_state.json",
-    "sfp_scanner": Path(__file__).parent / "data" / "sfp_state.json",
-    "sfp": Path(__file__).parent / "data" / "sfp_state.json",
 }
 
 def _ensure_dir():
@@ -119,8 +117,6 @@ def _bot_aliases() -> dict:
     return {
         "auto_trader": "accumulation",
         "accumulation": "auto_trader",
-        "sfp_scanner": "sfp",
-        "sfp": "sfp_scanner",
     }
 
 
@@ -150,7 +146,7 @@ def _resolve_run(trade: dict) -> int:
                 best_run = entry["run"]
     return best_run
 
-DEFAULT_LEVERAGE = {"accumulation": 10, "sfp": 5}
+DEFAULT_LEVERAGE = {"accumulation": 10}
 
 def reset_all_data():
     """Wipe trade history, positions, and run counters for a fresh start."""
@@ -230,13 +226,9 @@ def get_stats() -> dict:
         }
 
     acc_trades = [t for t in trades if t.get("bot") in ("accumulation", "auto_trader")]
-    sfp_trades = [t for t in trades if t.get("bot") in ("sfp", "sfp_scanner")]
 
     result = _calc(trades)
     result["accumulation"] = _calc(acc_trades)
     result["accumulation"]["paper"] = _calc([t for t in acc_trades if not t.get("live")])
     result["accumulation"]["live"] = _calc([t for t in acc_trades if t.get("live")])
-    result["sfp"] = _calc(sfp_trades)
-    result["sfp"]["paper"] = _calc([t for t in sfp_trades if not t.get("live")])
-    result["sfp"]["live"] = _calc([t for t in sfp_trades if t.get("live")])
     return result

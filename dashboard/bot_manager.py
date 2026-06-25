@@ -24,11 +24,6 @@ BOTS = {
         "label": "Accumulation Trader",
         "default_args": [],
     },
-    "sfp_scanner": {
-        "script": "sfp_scanner.py",
-        "label": "SFP Scanner",
-        "default_args": ["--watch", "5"],
-    },
 }
 
 
@@ -48,7 +43,6 @@ class BotState:
 
 _bots: dict[str, BotState] = {
     "auto_trader": BotState(name="auto_trader"),
-    "sfp_scanner": BotState(name="sfp_scanner"),
 }
 
 

@@ -532,37 +532,6 @@
                     </div>
                 </div>
             </div>
-            <div class="bot-stats-card">
-                <div class="bot-stats-header">
-                    <span class="bot-stats-title">SFP Scanner</span>
-                </div>
-                <div class="metrics-row">
-                    <div class="metric">
-                        <div class="metric-value" id="sfp-pnl-paper">--</div>
-                        <div class="metric-label">Paper P&L</div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-value" id="sfp-pnl-live">--</div>
-                        <div class="metric-label">Live P&L</div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-value" id="sfp-pnl-unrealized">--</div>
-                        <div class="metric-label">Unrealized</div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-value" id="sfp-winrate">--</div>
-                        <div class="metric-label">Win Rate</div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-value" id="sfp-trades">--</div>
-                        <div class="metric-label">Trades</div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-value" id="sfp-open">--</div>
-                        <div class="metric-label">Open</div>
-                    </div>
-                </div>
-            </div>
         </div>
 
         <!-- Combined totals -->
@@ -683,38 +652,6 @@
                 <div class="uptime-bar" id="uptime-auto_trader"></div>
             </div>
 
-            <!-- SFP Scanner -->
-            <div class="bot-panel" id="panel-sfp_scanner">
-                <div class="bot-panel-header">
-                    <span class="bot-name">SFP Scanner</span>
-                    <span class="status-badge status-stopped" id="status-sfp_scanner">STOPPED</span>
-                </div>
-                <div class="controls-bar">
-                    <div class="control-group">
-                        <label>Capital</label>
-                        <input type="number" id="balance-sfp_scanner" value="500" min="50" max="100000" step="100"
-                            title="Your capital -- max exposure = Capital x multiplier">
-                    </div>
-                    <div class="control-group">
-                        <label>Exposure</label>
-                        <input type="number" id="exposure-sfp_scanner" value="10" min="1" max="20" step="1"
-                            title="Max notional = Capital x this" style="width:50px">
-                        <label style="color:var(--text-muted)">x</label>
-                    </div>
-                    <div class="control-sep"></div>
-                    <div class="checkbox-group">
-                        <input type="checkbox" id="live-sfp_scanner">
-                        <label for="live-sfp_scanner" title="OFF = paper, ON = real orders">Live</label>
-                    </div>
-                    <div class="control-sep"></div>
-                    <button class="btn btn-start" onclick="startBot('sfp_scanner')">Start</button>
-                    <button class="btn btn-stop" onclick="stopBot('sfp_scanner')">Stop</button>
-                    <button class="btn btn-caff" id="caff-sfp_scanner" onclick="toggleCaff('sfp_scanner')"
-                        title="Prevent idle sleep while bot runs">Awake</button>
-                </div>
-                <div class="log-container" id="logs-sfp_scanner"></div>
-                <div class="uptime-bar" id="uptime-sfp_scanner"></div>
-            </div>
         </div>
     </div>
 
@@ -845,9 +782,6 @@
                 const accStats = stats.accumulation || {};
                 const accPaper = accStats.paper || {};
                 const accLive = accStats.live || {};
-                const sfpStats = stats.sfp || {};
-                const sfpPaper = sfpStats.paper || {};
-                const sfpLive = sfpStats.live || {};
 
                 document.getElementById('acc-pnl-paper').innerHTML = fmtPnl(accPaper.total_pnl_usd || 0, '');
                 document.getElementById('acc-pnl-live').innerHTML = fmtPnl(accLive.total_pnl_usd || 0, '');
@@ -855,13 +789,7 @@
                     accStats.total_trades > 0 ? accStats.win_rate.toFixed(1) + '%' : '--';
                 document.getElementById('acc-trades').textContent = accStats.total_trades || 0;
 
-                document.getElementById('sfp-pnl-paper').innerHTML = fmtPnl(sfpPaper.total_pnl_usd || 0, '');
-                document.getElementById('sfp-pnl-live').innerHTML = fmtPnl(sfpLive.total_pnl_usd || 0, '');
-                document.getElementById('sfp-winrate').textContent =
-                    sfpStats.total_trades > 0 ? sfpStats.win_rate.toFixed(1) + '%' : '--';
-                document.getElementById('sfp-trades').textContent = sfpStats.total_trades || 0;
-
-                const totalPnl = (accStats.total_pnl_usd || 0) + (sfpStats.total_pnl_usd || 0);
+                const totalPnl = accStats.total_pnl_usd || 0;
                 document.getElementById('stat-pnl').innerHTML = fmtPnl(totalPnl, '');
                 document.getElementById('stat-winrate').textContent =
                     stats.win_rate !== undefined ? stats.win_rate.toFixed(1) + '%' : '--';
@@ -869,8 +797,8 @@
                     stats.total_trades !== undefined ? stats.total_trades : '--';
 
                 let openCount = 0;
-                let accOpen = 0, sfpOpen = 0;
-                let accUnrealized = 0, sfpUnrealized = 0;
+                let accOpen = 0;
+                let accUnrealized = 0;
                 const rows = [];
                 const now = Date.now() / 1000;
 
@@ -878,9 +806,7 @@
                     const positions = botData.positions || [];
                     openCount += positions.length;
                     const isAcc = botName === 'accumulation' || botName === 'auto_trader';
-                    const isSfp = botName === 'sfp' || botName === 'sfp_scanner';
                     if (isAcc) accOpen += positions.length;
-                    if (isSfp) sfpOpen += positions.length;
                     for (const p of positions) {
                         const pnlPct = p.pnl_pct !== undefined ? p.pnl_pct : null;
                         const sizeUsdt = p.size_usdt !== undefined ? p.size_usdt : null;
@@ -889,7 +815,6 @@
                             ? pnlPct / 100 * sizeUsdt : null;
                         if (pnlUsd !== null) {
                             if (isAcc) accUnrealized += pnlUsd;
-                            if (isSfp) sfpUnrealized += pnlUsd;
                         }
                         const heldSec = p.entry_time ? now - p.entry_time : null;
                         const sizeLabel = sizeUsdt !== null ? `$${sizeUsdt.toLocaleString()}` : '--';
@@ -912,10 +837,8 @@
 
                 document.getElementById('acc-pnl-unrealized').innerHTML = fmtPnl(accUnrealized, '');
                 document.getElementById('acc-open').textContent = accOpen;
-                document.getElementById('sfp-pnl-unrealized').innerHTML = fmtPnl(sfpUnrealized, '');
-                document.getElementById('sfp-open').textContent = sfpOpen;
 
-                const combinedPnl = totalPnl + accUnrealized + sfpUnrealized;
+                const combinedPnl = totalPnl + accUnrealized;
                 document.getElementById('stat-pnl').innerHTML = fmtPnl(combinedPnl, '');
 
                 document.getElementById('stat-open').textContent = openCount;

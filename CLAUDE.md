@@ -1,14 +1,12 @@
 # Bybit Trading Bot
 
 ## Project Overview
-Two automated Bybit USDT perpetual futures bots with a web dashboard:
+Automated Bybit USDT perpetual futures momentum bot with a web dashboard:
 - **Accumulation/Momentum Bot** (`auto_trader.py`) — finds quiet Pool D coins showing early accumulation, enters LONG before the pump
-- **SFP Scanner** (`sfp_scanner.py`) — trades Swing Failure Patterns with graded entries (A+ to D)
 
 ## Key Files
 - `auto_trader.py` — Main momentum bot. Entry scoring, exit strategy, paper/live trading
 - `momentum_scanner.py` — Signal analysis: accumulation, pre-squeeze, volume, OI, funding, crime pump detection
-- `sfp_scanner.py` — SFP pattern scanner with trailing stops
 - `shared_state.py` — Shared data layer (positions, trade history, stats)
 - `run_dashboard.py` — Dashboard launcher (port 8420)
 - `dashboard/app.py` — FastAPI dashboard backend
@@ -28,7 +26,6 @@ Two automated Bybit USDT perpetual futures bots with a web dashboard:
 - `data/positions.json` — Open positions
 - `data/runs.json` — Run metadata
 - `data/auto_trader_state.json` — Momentum bot session state
-- `data/sfp_state.json` — SFP bot session state
 - `trade_log.csv` — Raw CSV trade log
 - Reset all: `python3 -c "import shared_state; shared_state.reset_all_data()"`
 
@@ -42,9 +39,6 @@ python3 auto_trader.py
 
 # Momentum bot (live)
 python3 auto_trader.py --live --amount 250
-
-# SFP bot (paper)
-python3 sfp_scanner.py
 ```
 
 ## Environment
@@ -52,13 +46,13 @@ python3 sfp_scanner.py
 - Requires: `BYBIT_API_KEY` and `BYBIT_API_SECRET` env vars for live mode
 - Dependencies: fastapi, uvicorn (for dashboard)
 
-## Recent Changes (this session)
+## Recent Changes
 1. Added funding normalization exit for runners (detect squeeze fuel exhaustion)
 2. Unified strategy — removed lottery/regular split, crime score modifies size
 3. Scale-out + runner exit strategy (OI divergence, structure break, ratchet floors)
-4. Tightened SFP trailing stops, added 24h stale exit
-5. Dashboard no-cache headers fix
-6. Created STRATEGY.md and PDF for trader review
+4. Dashboard no-cache headers fix
+5. Created STRATEGY.md and PDF for trader review
+6. Removed SFP bot entirely — project focused solely on momentum bot
 
 ## Pending Ideas
 - Telegram bot integration for mobile control (start/stop bots, notifications, P&L)

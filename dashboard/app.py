@@ -79,8 +79,8 @@ async def get_positions():
     all_pos = shared_state.read_all_positions()
     filtered = {}
     for bot_key, data in all_pos.items():
-        name = {"accumulation": "auto_trader", "sfp": "sfp_scanner"}.get(bot_key, bot_key)
-        state = bot_manager.get_state(name) if name in ("auto_trader", "sfp_scanner") else None
+        name = {"accumulation": "auto_trader"}.get(bot_key, bot_key)
+        state = bot_manager.get_state(name) if name in ("auto_trader",) else None
         if state and (state.status == "running" or state.is_live):
             filtered[bot_key] = data
     return filtered
